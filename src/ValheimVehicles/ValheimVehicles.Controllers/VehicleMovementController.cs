@@ -682,12 +682,12 @@
 
       bool IsActivatedThis()
       {
-        return PiecesController != null && PiecesController.isInitialPieceActivationComplete && PiecesController.m_convexHullAPI.convexHullMeshColliders.Count > 0;
+        return PiecesController != null && ((BasePiecesController)PiecesController).IsInitialPieceActivationComplete && PiecesController.m_convexHullAPI.convexHullMeshColliders.Count > 0;
       }
 
       bool IsActivatedOther()
       {
-        return Manager.VehicleParent != null && Manager.VehicleParent.PiecesController != null && Manager.VehicleParent.PiecesController.isInitialPieceActivationComplete && Manager.VehicleParent.PiecesController.m_convexHullAPI.convexHullMeshColliders.Count > 0;
+        return Manager.VehicleParent != null && Manager.VehicleParent.PiecesController != null && ((BasePiecesController)Manager.VehicleParent.PiecesController).IsInitialPieceActivationComplete && Manager.VehicleParent.PiecesController.m_convexHullAPI.convexHullMeshColliders.Count > 0;
       }
 
       while (!IsExpired())
@@ -900,7 +900,7 @@
 
       // if the vehicle has not initialized pieces, physics should never be run.
       if (!Manager!
-            .PiecesController!.isInitialPieceActivationComplete)
+            .PiecesController!.IsInitialPieceActivationComplete)
       {
         m_body.isKinematic = true;
         return;
@@ -2078,7 +2078,7 @@
     public void InitLandVehicleWheels()
     {
       if (LandMovementController == null || PiecesController == null) return;
-      if (LandMovementController.wheelColliders.Count == 0)
+      if (LandMovementController.treadsLeftMovingComponent == null | LandMovementController.treadsRightMovingComponent == null)
       {
         m_body.Sleep();
         m_body.isKinematic = true;
@@ -2172,7 +2172,7 @@
       var isForward = VehicleSpeed != Ship.Speed.Back;
       var landInputMovementMultiplier = GetLandVehicleSpeedInput();
       LandMovementController!.inputMovement = landInputMovementMultiplier;
-      if (landSpeed != LandMovementController!.accelerationType || LandMovementController.isForward != isForward)
+      if (landSpeed != LandMovementController!.accelerationType)
       {
         LandMovementController.forwardDirection = ShipDirection;
         LandMovementController.UpdateAccelerationValues(landSpeed, isForward);
@@ -5062,6 +5062,11 @@
     }
 
     public ZNetView? m_nview
+    {
+      get;
+      set;
+    }
+    public ZDO? m_zdo
     {
       get;
       set;

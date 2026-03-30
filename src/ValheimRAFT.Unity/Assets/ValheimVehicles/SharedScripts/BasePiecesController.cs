@@ -7,6 +7,7 @@
   using System.Linq;
   using Unity.Collections;
   using UnityEngine;
+  using ValheimVehicles.Shared.Constants;
   using Zolantris.Shared;
   using Debug = UnityEngine.Debug;
 
@@ -51,6 +52,9 @@
       public MeshClusterController m_meshClusterComponent;
       public int pieceDataChangeIndex;
 
+      public bool HasClusterMeshesEnabled;
+      public int MinClusterThreshold = 500;
+
       // convexJobHandler is used for scheduling all piece updates.
       public ConvexHullJobHandler m_convexHullJobHandler;
 
@@ -73,7 +77,11 @@
       internal bool _shouldUpdatePieceColliders;
       internal bool _shouldUpdateVehicleColliders;
 
-      internal bool isInitialPieceActivationComplete;
+      public virtual bool IsInitialPieceActivationComplete
+      {
+        get;
+        set;
+      }
       private List<Vector3> normals = new();
       private List<int> tris = new();
 
@@ -85,7 +93,18 @@
       public List<GameObject> convexHullTriggerMeshes =>
         m_convexHullAPI.convexHullTriggerMeshes;
 
-      public bool IsActivationComplete
+      public bool enableOriginRecentering = true;
+      public bool recenterOnlyXZ = true;
+      public float originShiftMinDistance = 0.01f;
+
+      /// <summary>
+      /// Fired after piece transforms have been shifted in local space.
+      /// Payload = the local origin shift that was applied.
+      /// Consumers should usually subtract this from their stored local offsets.
+      /// </summary>
+      public event Action<Vector3>? OnLocalOriginShiftApplied;
+
+      public virtual bool IsActivationComplete
       {
         get;
       }
@@ -112,6 +131,19 @@
       CustomFixedUpdate(Time.fixedDeltaTime);
     }
 #endif
+
+      public virtual void OnEnable()
+      {
+#if !VALHEIM
+      // injects any existing children as pieces in case they were added before the controller was enabled. In Valheim this is not needed since pieces are added through the PieceManager which calls OnPieceAdded.
+      for (var i = 0; i < transform.childCount; i++)
+      {
+        var child = transform.GetChild(i).gameObject;
+        if (child.name.StartsWith("colliders")) continue;
+        OnPieceAdded(child);
+      }
+#endif
+      }
 
       public virtual void OnDisable()
       {
@@ -166,9 +198,9 @@
 
 
 #if !VALHEIM
-      if (!isInitialPieceActivationComplete)
+      if (!IsInitialPieceActivationComplete)
       {
-        isInitialPieceActivationComplete = true;
+        IsInitialPieceActivationComplete = true;
       }
 #endif
 
@@ -197,7 +229,7 @@
         // }
 
         // will only update if there is a subscription for this texture.
-        if (isInitialPieceActivationComplete)
+        if (IsInitialPieceActivationComplete)
         {
           m_meshClusterComponent.ScheduleRebuildCombinedMeshes(piece);
         }
@@ -229,7 +261,7 @@
         }
 
         // we do not rebuild bounds until this generation is completed
-        if (!isInitialPieceActivationComplete)
+        if (!IsInitialPieceActivationComplete)
         {
           return;
         }
@@ -272,8 +304,141 @@
           return;
         }
 
-        var items = m_prefabPieceDataItems.Keys.Where(x => x != null).ToArray();
-        m_meshClusterComponent.GenerateCombinedMeshes(items);
+        UpdateVehicleTrueCenter();
+      }
+
+      public virtual void UpdateVehicleTrueCenter()
+      {
+        var currentBounds = m_convexHullAPI.GetConvexHullBounds(true);
+
+        var didShift = TryRecenterPiecesToBounds(currentBounds);
+
+        if (didShift)
+        {
+          // Rebuild immediately using the shifted piece transforms so the final convex hull
+          // and movement bounds are aligned to the new effective origin.
+          TryGenerateConvexHull(clusterThreshold, shiftedSucceeded =>
+          {
+            if (!shiftedSucceeded)
+            {
+              RequestBoundsRebuild();
+              return;
+            }
+
+            FinalizeBoundsGenerationAfterShift();
+          });
+
+          return;
+        }
+
+        FinalizeBoundsGenerationAfterShift();
+      }
+
+      protected virtual Vector3 GetDesiredLocalOriginShift(Bounds bounds)
+      {
+        return recenterOnlyXZ
+          ? new Vector3(bounds.center.x, 0f, bounds.center.z)
+          : bounds.center;
+      }
+
+      protected virtual bool ShouldApplyLocalOriginShift(Vector3 localShift)
+      {
+        return enableOriginRecentering && localShift.magnitude >= originShiftMinDistance;
+      }
+
+      /// <summary>
+      /// Shifts all tracked prefab pieces by -localShift so the effective controller-local origin
+      /// moves toward the desired center without moving the controller transform itself.
+      /// This is Unity-testable and integration-agnostic.
+      ///
+      /// Critical update to ensure that a vehicle's physics is aligned in the correct place
+      ///
+      /// For landvehicles this could be the position between the treads.
+      /// For watervehicles this could be the position near the back where the propeller is.
+      /// </summary>
+      protected virtual bool TryApplyLocalOriginShift(Vector3 localShift)
+      {
+        if (!ShouldApplyLocalOriginShift(localShift))
+        {
+          return false;
+        }
+
+        if (m_prefabPieceDataItems.Count == 0)
+        {
+          return false;
+        }
+
+        var movedAny = false;
+        var keys = m_prefabPieceDataItems.Keys.ToList();
+
+        foreach (var piece in keys)
+        {
+          if (!piece) continue;
+          if (!m_prefabPieceDataItems.TryGetValue(piece, out var data)) continue;
+          // swivel children should not be shifted. Only swivels themselves can be shifted and even then only the top most swivel. Nested swivels would just inherit from top most swivel.
+          if (data.IsSwivelChild) continue;
+
+          data.ApplyLocalShift(localShift);
+          m_prefabPieceDataItems[piece] = data;
+          movedAny = true;
+        }
+
+        if (!movedAny)
+        {
+          return false;
+        }
+
+        var worldShift = transform.TransformVector(localShift);
+
+        if (m_localRigidbody)
+        {
+          m_localRigidbody.position += worldShift;
+        }
+
+        if (m_syncRigidbody)
+        {
+          m_syncRigidbody.position += worldShift;
+        }
+
+        Physics.SyncTransforms();
+        OnLocalOriginShiftApplied?.Invoke(localShift);
+        return true;
+      }
+
+      /// <summary>
+      /// Rebuilds PrefabPieceData entries after transforms have been shifted.
+      /// This keeps bounds/collider point caches accurate for subsequent hull rebuilds.
+      /// </summary>
+      protected virtual void RebuildPrefabPieceDataForShiftedPieces(List<GameObject> movedPieces)
+      {
+        foreach (var piece in movedPieces)
+        {
+          if (!piece) continue;
+
+          if (m_prefabPieceDataItems.ContainsKey(piece))
+          {
+            m_prefabPieceDataItems.Remove(piece);
+          }
+
+          var newData = new PrefabPieceData(piece, Allocator.Persistent);
+          m_prefabPieceDataItems[piece] = newData;
+        }
+      }
+
+      protected virtual bool TryRecenterPiecesToBounds(Bounds bounds)
+      {
+        var localShift = GetDesiredLocalOriginShift(bounds);
+        return TryApplyLocalOriginShift(localShift);
+      }
+
+      protected virtual void FinalizeBoundsGenerationAfterShift()
+      {
+        var items = m_prefabPieceDataItems.Keys.Where(x => x != null && !m_prefabPieceDataItems[x].IsSwivelChild).ToArray();
+
+        if (HasClusterMeshesEnabled && items.Length >= MinClusterThreshold)
+        {
+          m_meshClusterComponent.GenerateCombinedMeshes(items);
+        }
 
         if (LandMovementController != null)
         {
@@ -281,6 +446,7 @@
           LandMovementController.Initialize(bounds);
         }
       }
+
       public virtual int GetPieceCount()
       {
         return m_prefabPieceDataItems.Count;
@@ -298,7 +464,7 @@
         yield return new WaitUntil(() => _lastRebuildTime + 5f < Time.fixedTime);
 
         var timer = Stopwatch.StartNew();
-        while (timer.ElapsedMilliseconds < 2000f && !isInitialPieceActivationComplete)
+        while (timer.ElapsedMilliseconds < 2000f && !IsInitialPieceActivationComplete)
         {
           if (!isActiveAndEnabled) yield break;
           yield return new WaitForFixedUpdate();
@@ -468,7 +634,7 @@
         if (points.Count <= 4 || !m_convexHullCalculator.GenerateHull(points, false, ref verts, ref tris, ref normals, out var hasBailed))
         {
 #if DEBUG
-        LoggerProvider.LogDev($"Points less than 4. Got {points.Count} points. Bailing early. This task will be rescheduled");
+          LoggerProvider.LogDev($"Points less than 4. Got {points.Count} points. Bailing early. This task will be rescheduled");
 #endif
           callback?.Invoke(false);
           return;
