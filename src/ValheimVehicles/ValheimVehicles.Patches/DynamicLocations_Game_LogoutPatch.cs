@@ -2,6 +2,7 @@
 
   using DynamicLocations.Controllers;
   using HarmonyLib;
+  using UnityEngine;
   using ValheimVehicles.Controllers;
 
 #endregion
@@ -32,7 +33,17 @@
         return;
       }
 
+      // Capture the player's position relative to the vehicle pieces transform so login can restore
+      // the exact standing spot on the (possibly moved/rotated) boat — rather than snapping to a bed.
+      Vector3? localOffset = null;
+      var piecesController = onboardData.OnboardController.PiecesController;
+      if (piecesController != null)
+      {
+        localOffset = piecesController.transform.InverseTransformPoint(
+          Player.m_localPlayer.transform.position);
+      }
+
       PlayerSpawnController.Instance.SyncLogoutPoint(
-        onboardData.OnboardController.m_nview.GetZDO());
+        onboardData.OnboardController.m_nview.GetZDO(), false, localOffset);
     }
   }

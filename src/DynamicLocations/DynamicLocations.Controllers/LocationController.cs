@@ -462,6 +462,19 @@ public class LocationController : MonoBehaviour
   }
 
   /// <summary>
+  /// Writes the logout offset directly to player customData. Unlike <see cref="SetOffset(string,Player,Vector3)"/>
+  /// this does NOT scrub Vector3.zero — a zero offset is a legitimate "standing at the vehicle
+  /// pieces origin" value that must be preserved so login restores the exact spot.
+  /// </summary>
+  public static void SetLogoutOffsetRaw(Player player, Vector3 offset)
+  {
+    if (!player) return;
+    var key = GetOffsetStorageKey(LocationVariation.Logout);
+    if (string.IsNullOrEmpty(key)) return;
+    player.m_customData[key] = Vector3ToString(offset);
+  }
+
+  /// <summary>
   /// Only sets offset if necessary, otherwise scrubs the data
   /// </summary>
   /// <param name="key"></param>
