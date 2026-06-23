@@ -33,6 +33,14 @@ public class PlayerSpawnController : MonoBehaviour
 
   public static PlayerSpawnController? Instance;
 
+  /// <summary>
+  /// Assigned by the vehicle mod (ValheimVehicles) at init so DynamicLocations can detect whether a
+  /// bed is on a moving vehicle WITHOUT referencing the vehicle assembly (keeps the dependency
+  /// direction correct). Returns true when the bed is parented to a vehicle. When null/false the bed
+  /// is treated as a land bed and dynamic spawn is skipped (pure vanilla spawn).
+  /// </summary>
+  public static Func<Bed, bool>? IsBedOnDynamicVehicle;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;
@@ -183,6 +191,17 @@ public class PlayerSpawnController : MonoBehaviour
   }
 
   /// <summary>
+  /// Clears any stored dynamic spawn (bed) point + offset for the current player. Called when the
+  /// player sets their spawn at a NON-vehicle (land) bed, so a previously-registered vehicle bed
+  /// does not linger and vanilla spawn mechanics take over completely.
+  /// </summary>
+  public void ClearDynamicSpawnPoint()
+  {
+    if (player == null) return;
+    LocationController.RemoveZdoTarget(LocationVariation.Spawn, player);
+  }
+
+  /// <summary>
   /// Sets or removes the spawnPointZdo to the bed it is associated with a moving zdo
   /// - Only should be called when the bed is interacted with
   /// - This id is used to poke a zone and load it, then teleport the player to their bed like they are spawning
@@ -214,13 +233,14 @@ public class PlayerSpawnController : MonoBehaviour
   /// Must be called on logout, and should be fired optimistically to avoid desync if crashes happen.
   /// </summary>
   /// <returns>bool</returns>
-  public bool SyncLogoutPoint(ZDO? zdo, bool shouldRemove = false)
+  public bool SyncLogoutPoint(ZDO? zdo, bool shouldRemove = false,
+    Vector3? localOffset = null)
   {
     if (ZNet.instance == null) return false;
     if (zdo == null && !shouldRemove)
     {
       Logger.LogError(
-        "ZDO not found for netview, this likely means something is wrong with the are it is being called in");
+        "ZDO not found for netview, this likely means something is wrong with the area it is being called in");
       return false;
     }
 
@@ -231,33 +251,35 @@ public class PlayerSpawnController : MonoBehaviour
       return true;
     }
 
+    if (player == null) return false;
+
     var isPersistent =
       PersistDynamicPoint(zdo, LocationVariation.Logout, out var id);
-    if (!shouldRemove && !isPersistent)
+    if (!isPersistent)
     {
       Logger.LogDebug("vehicleZdoId is invalid");
       return false;
     }
+
+    // Always (re)store the boat-relative standing offset. The offset is the player's position
+    // relative to the vehicle pieces transform (computed by the caller at logout). Writing it
+    // BEFORE the "already-stored zdo" check ensures re-logging-out on the same boat without moving
+    // still refreshes the standing spot. We write it raw so a legitimate ~zero offset (standing at
+    // the pieces origin) is preserved (LocationController.SetOffset scrubs Vector3.zero).
+    var offsetToStore = localOffset ?? player.transform.localPosition;
+    LocationController.SetLogoutOffsetRaw(player, offsetToStore);
 
     var storedPersistentZdo =
       LocationController.GetZdoFromStore(LocationVariation.Logout, player);
     if (storedPersistentZdo == id)
     {
       Logger.LogDebug(
-        "Matching ZDOID found already stored, skipping sync/save");
-      return false;
-    }
-
-    if (player == null) return false;
-
-    if (player.transform.localPosition != player.transform.position)
-    {
-      LocationController.SetOffset(LocationVariation.Logout, player,
-        player.transform.localPosition);
+        "Matching ZDOID already stored, refreshed offset, skipping zdo re-save");
+      Game.instance.m_playerProfile.SavePlayerData(player);
+      return true;
     }
 
     LocationController.SetZdo(LocationVariation.Logout, player, zdo);
-
 
     Game.instance.m_playerProfile.SavePlayerData(player);
     return true;
@@ -322,8 +344,11 @@ public class PlayerSpawnController : MonoBehaviour
 
     var offset = LocationController.GetOffset(locationVariationType, player);
     ZDO? zdoOutput = null;
+    // shouldAdjustReferencePoint: true sets ZNet reference position to the target ZDO so the boat's
+    // zone streams in for the respawning/logging-in CLIENT — required for dedicated servers where the
+    // boat lives in a zone the client has not loaded yet.
     yield return FindDynamicZdo(locationVariationType,
-      output => { zdoOutput = output; });
+      output => { zdoOutput = output; }, shouldAdjustReferencePoint: true);
 
     if (
       zdoOutput == null)
@@ -355,8 +380,10 @@ public class PlayerSpawnController : MonoBehaviour
       // remove logout point after moving the player.
       case LocationVariation.Logout when player != null:
       {
+        // Consume the one-time logout point after a successful restore so the next session does not
+        // re-teleport to the boat. Remove UNLESS the debug "keep data" flag is set (was inverted).
         if (CanRemoveLogoutAfterSync &&
-            DynamicLocationsConfig.DEBUG_ShouldNotRemoveTargetKey.Value)
+            !DynamicLocationsConfig.DEBUG_ShouldNotRemoveTargetKey.Value)
         {
           LocationController.RemoveZdoTarget(
             LocationVariation.Logout,
@@ -386,7 +413,7 @@ public class PlayerSpawnController : MonoBehaviour
     return MoveToSpawnRoutine;
   }
 
-  private void SyncPlayerPosition(Vector3 newPosition)
+  public void SyncPlayerPosition(Vector3 newPosition)
   {
     Logger.LogDebug("Running PlayerPosition Sync");
     if (ZNetView.m_forceDisableInit || player == null) return;
@@ -550,7 +577,18 @@ public class PlayerSpawnController : MonoBehaviour
     if (HasExpiredTimer(timer,
           DynamicLocationsConfig.LocationControlsTimeoutInMs.Value))
     {
+      // The boat never streamed in / its instance was never found (e.g. it was destroyed or sank,
+      // or the zone failed to load on a dedicated server). Unfreeze the player and bail to wherever
+      // vanilla already placed them, so they are never trapped frozen on the death/login screen.
       Logger.LogError("Error attempting to find NetView instance of the ZDO");
+      if (player != null)
+      {
+        if (player.IsDebugFlying()) player.ToggleDebugFly();
+        if (player.m_body != null) player.m_body.isKinematic = false;
+      }
+
+      OnMovePlayerToZdoComplete(false,
+        "Timed out finding NetView instance of the ZDO");
       yield break;
     }
 
@@ -562,22 +600,36 @@ public class PlayerSpawnController : MonoBehaviour
       }
     }
 
-    if (DynamicLocationsConfig.DebugForceUpdatePositionAfterTeleport.Value &&
-        DynamicLocationsConfig.DebugForceUpdatePositionDelay.Value > 0f)
+    // Optional settle delay before final placement (lets the boat finish activating its pieces).
+    if (DynamicLocationsConfig.DebugForceUpdatePositionDelay.Value > 0f)
     {
       yield return new WaitForSeconds(DynamicLocationsConfig
         .DebugForceUpdatePositionDelay.Value);
     }
 
-    if (player != null && DynamicLocationsConfig
-          .DebugForceUpdatePositionAfterTeleport.Value)
+    // Final placement at the LIVE target transform. For a bed (death respawn) this uses the bed's
+    // current spawn point, which follows the boat — so the player lands ON the bed wherever the boat
+    // has moved (acceptance #2). This must run in normal play; it was previously gated behind the
+    // DebugForceUpdatePositionAfterTeleport flag (default false), which dropped the placement and
+    // left the player at the raw ZDO origin. For the logout path the precise standing-spot placement
+    // happens afterward in the vehicle login integration, so this acts as a safe coarse position.
+    if (player != null && zdoNetViewInstance != null)
     {
-      var positionWithOffset =
-        zdoNetViewInstance?.transform.position + offset;
-      teleportPosition = (positionWithOffset ?? zdo.GetPosition()) +
+      var bed = zdoNetViewInstance.GetComponent<Bed>();
+      var basePosition = bed != null
+        ? bed.GetSpawnPoint()
+        : zdoNetViewInstance.transform.position;
+      teleportPosition = basePosition +
                          Vector3.up *
                          DynamicLocationsConfig.RespawnHeightOffset.Value;
       player.transform.position = teleportPosition;
+      if (player.m_body != null)
+      {
+        player.m_body.velocity = Vector3.zero;
+        player.m_body.angularVelocity = Vector3.zero;
+      }
+
+      SyncPlayerPosition(teleportPosition);
     }
 
     timer.Clear();

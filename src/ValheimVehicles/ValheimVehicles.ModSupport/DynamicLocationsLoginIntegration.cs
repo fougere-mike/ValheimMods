@@ -70,14 +70,35 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
                                        vehicle.Instance.PiecesController.IsActivationComplete) ||
                                      localTimer.ElapsedMilliseconds > 2000);
 
-    if (ModSupportConfig.DynamicLocationLoginMovesPlayerToBed.Value)
+    // Restore the player to the EXACT boat-relative spot where they logged off (acceptance #1).
+    // The stored offset is relative to the vehicle pieces transform, so TransformPoint reconstructs
+    // the world position even if the boat has moved or rotated since logout.
+    var vpc = vehicle.PiecesController;
+    var player = Player.m_localPlayer;
+    if (vpc != null && player != null && offset.HasValue)
     {
+      var worldPos = vpc.transform.TransformPoint(offset.Value);
+      player.transform.position = worldPos;
+      player.transform.SetParent(vpc.transform);
+      if (player.m_body != null)
+      {
+        player.m_body.velocity = Vector3.zero;
+        player.m_body.angularVelocity = Vector3.zero;
+      }
+
+      // Keep the server/zdo in sync so the player isn't streamed back to the pre-teleport position.
+      playerSpawnController.SyncPlayerPosition(worldPos);
+    }
+    else if (ModSupportConfig.DynamicLocationLoginMovesPlayerToBed.Value)
+    {
+      // Fallback only (no stored standing offset): snap to a bed on the ship.
       MovePlayerToBedOnShip(vehicle);
     }
 
-    if (Player.m_localPlayer != null)
+    if (player != null)
     {
-      Player.m_localPlayer.m_body.isKinematic = false;
+      if (player.IsDebugFlying()) player.ToggleDebugFly();
+      if (player.m_body != null) player.m_body.isKinematic = false;
     }
 
     var isActivationComplete = vehicle.Instance.PiecesController != null && vehicle.Instance.PiecesController.IsActivationComplete;
@@ -98,21 +119,6 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     }
   }
 
-  private static void PlayerMoveToNetViewSafe(Player player, ZNetView netView)
-  {
-    if (netView == null) return;
-    var piecePos = netView.GetZDO().GetPosition();
-    var pieceOffset = netView.GetZDO().GetVec3(VehicleZdoVars.MBPositionHash, Vector3.zero);
-    var heightOffset = Vector3.up * 1.5f;
-    var finalPos = piecePos + pieceOffset + heightOffset;
-
-    if (PlayerSpawnController.Instance != null)
-    {
-      PlayerSpawnController.Instance.DynamicTeleport(finalPos,
-        player.transform.rotation);
-    }
-  }
-
   private bool MovePlayerToBedOnShip(VehicleManager vehicle)
   {
     if (vehicle.PiecesController == null || Player.m_localPlayer == null) return false;
@@ -130,7 +136,10 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
       : bedPieces.First();
     if (selectedPiece == null) return false;
 
-    PlayerMoveToNetViewSafe(Player.m_localPlayer, selectedPiece.m_nview);
+    // Use the LIVE bed transform. Beds already sync their ZDO position to world position
+    // (UpdateBedPieces), so adding the stored MBPositionHash offset on top double-counted and
+    // placed the player off the bed.
+    PlayerMoveToTransformSafe(selectedPiece.transform);
     return true;
   }
 

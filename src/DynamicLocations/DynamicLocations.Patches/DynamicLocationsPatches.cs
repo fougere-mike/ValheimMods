@@ -15,17 +15,15 @@ public class DynamicLocationsPatches
   [HarmonyPostfix]
   private static void OnSpawnPointUpdated(Bed __instance)
   {
-    // todo compare if the current bed zdo is the players otherwise update it.
-    var currentSpawnPoint =
-      Game.instance.GetPlayerProfile().GetCustomSpawnPoint();
+    var character = Player.m_localPlayer;
+    if (character == null) return;
 
-    var character = Player.m_localPlayer as Character;
     if (character.InInterior())
     {
       if (DynamicLocationsConfig.IsDebug)
       {
         Logger.LogDebug(
-          "Cannot dynamic spawn inside dungeon or building. InIniterior returned true, must skip.");
+          "Cannot dynamic spawn inside dungeon or building. InInterior returned true, must skip.");
       }
 
       return;
@@ -33,7 +31,27 @@ public class DynamicLocationsPatches
 
     var spawnController = PlayerSpawnController.Instance;
     if (!spawnController) return;
-    spawnController?.SyncBedSpawnPoint(__instance.m_nview.GetZDO(), __instance);
+    if (__instance.m_nview == null || __instance.m_nview.GetZDO() == null) return;
+
+    // Only beds on a moving vehicle should use dynamic spawn. A land bed must keep vanilla spawn
+    // mechanics untouched — otherwise the post-spawn teleport corrupts normal respawns (the
+    // "respawn drifts along the line from bed to death location" bug). If this is a land bed, clear
+    // any previously-registered vehicle dynamic spawn so it cannot linger, then leave it to vanilla.
+    var isOnVehicle =
+      PlayerSpawnController.IsBedOnDynamicVehicle?.Invoke(__instance) ?? false;
+    if (!isOnVehicle)
+    {
+      if (DynamicLocationsConfig.IsDebug)
+      {
+        Logger.LogDebug(
+          "Bed is not on a vehicle (land bed). Skipping dynamic spawn and clearing any stale dynamic spawn point.");
+      }
+
+      spawnController.ClearDynamicSpawnPoint();
+      return;
+    }
+
+    spawnController.SyncBedSpawnPoint(__instance.m_nview.GetZDO(), __instance);
   }
 
   // [HarmonyPatch(typeof(PlayerProfile), "SetLogoutPoint")]
@@ -145,9 +163,12 @@ public class DynamicLocationsPatches
   {
 
     if (ZNetView.m_forceDisableInit) return;
-    if (!DynamicLocationsConfig.EnableDynamicLogoutPoint.Value && !DynamicLocationsConfig.EnableDynamicLogoutPoint.Value)
-      if (__result == null || Game.instance == null)
-        return;
+    // Independent null guard (previously this was nested under the config check and could NPE below).
+    if (__result == null || Game.instance == null) return;
+    // Nothing to do if BOTH dynamic features are disabled (was a duplicated EnableDynamicLogoutPoint).
+    if (!DynamicLocationsConfig.EnableDynamicLogoutPoint.Value &&
+        !DynamicLocationsConfig.EnableDynamicSpawnPoint.Value)
+      return;
 
     SetupPlayerDebugValues();
 

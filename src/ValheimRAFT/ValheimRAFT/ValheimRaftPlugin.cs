@@ -178,6 +178,12 @@ public class ValheimRaftPlugin : BaseUnityPlugin
         dynamicLocationLoginIntegrationConfig);
     LoginAPIController.AddLoginApiIntegration(
       integrationInstance);
+
+    // Lets DynamicLocations detect whether a bed is on a moving vehicle without referencing this
+    // assembly. Land beds fall back to vanilla spawn; only vehicle beds use dynamic spawn.
+    PlayerSpawnController.IsBedOnDynamicVehicle = bed =>
+      bed != null &&
+      VehiclePiecesController.GetVehiclePiecesController(bed.gameObject) != null;
   }
 
 

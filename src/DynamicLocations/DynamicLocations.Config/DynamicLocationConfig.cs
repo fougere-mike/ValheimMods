@@ -134,9 +134,9 @@ FastDebugFlySpeed = config.BindUnique(MainSection,
 
     DEBUG_ShouldNotRemoveTargetKey = config.BindUnique(MainSection,
       "DEBUG_ShouldNotRemoveTargetKey",
-      true,
+      false,
       new ConfigDescription(
-        "Debug only command: will prevent removing of data on the player. This is meant to debug issues with the player spawn points. Should not be enabled in production builds.",
+        "Debug only command: will prevent removing of data on the player. This is meant to debug issues with the player spawn points. Should not be enabled in production builds. Default false so stale spawn/logout points are cleaned up normally (leaving them set causes incorrect re-teleports).",
         null,
         new ConfigurationManagerAttributes
           { IsAdminOnly = true, IsAdvanced = true }));
