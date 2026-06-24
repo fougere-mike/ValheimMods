@@ -135,13 +135,22 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
 
   /// <summary>
   /// The manual water-mask tool is retired. A placed water mask only does anything in
-  /// DEBUG_WaterZoneOnly mode (or if the creator tool has been deliberately re-enabled). When
-  /// neither is true the masks are vestigial, and WaterZoneController removes them on load
-  /// (orphaned strays AND ones still attached to a ship).
+  /// DEBUG_WaterZoneOnly mode; otherwise the masks are vestigial and WaterZoneController removes
+  /// them on load (orphaned strays AND ones still attached to a ship). NOTE: this deliberately
+  /// does NOT also key off the creator-tool config -- existing saves keep that config at its old
+  /// 'true' default, which would make cleanup skip itself forever.
   /// </summary>
   public static bool IsManualWaterMaskFeatureActive =>
-    UnderwaterAccessMode.Value == UnderwaterAccessModeType.DEBUG_WaterZoneOnly ||
-    CustomMeshConfig.EnableCustomWaterMeshCreators.Value;
+    UnderwaterAccessMode.Value == UnderwaterAccessModeType.DEBUG_WaterZoneOnly;
+
+  /// <summary>
+  /// When true, each vehicle maintains an automatic, invisible stencil water mask sized to its
+  /// onboard bounds so the hull interior stays dry. Active for the modes that remove water on or
+  /// around a vehicle. The mask is runtime-only (no ZDO) so it can never orphan.
+  /// </summary>
+  public static bool IsVehicleWaterMaskEnabled =>
+    UnderwaterAccessMode.Value is UnderwaterAccessModeType.OnboardOnly
+      or UnderwaterAccessModeType.Everywhere;
 
   public static void InitDebugConfig(ConfigFile config)
   {

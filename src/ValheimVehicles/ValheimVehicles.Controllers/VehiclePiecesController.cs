@@ -332,6 +332,9 @@
 
     public BoxCollider? OnboardCollider { get; set; }
 
+    // Runtime-only invisible water mask sized to the onboard bounds (see UpdateAutoWaterMask).
+    private GameObject? _autoWaterMask;
+
     private bool IsNotFlying =>
       !MovementController?.IsFlying() ?? false ||
       PropulsionConfig.AllowFlight.Value == false;
@@ -4170,7 +4173,54 @@
       OnboardCollider.size =
         onboardColliderSize;
       OnboardCollider.transform.localPosition = onboardColliderCenter;
+
+      UpdateAutoWaterMask();
+
       Physics.SyncTransforms();
+    }
+
+    /// <summary>
+    /// Maintains a runtime-only, invisible stencil "water mask" sized to the vehicle's onboard
+    /// box, so the water inside the hull is hidden (carved out) automatically and keeps matching
+    /// the ship as it is built. Unlike the retired manual water-mask tool it has no ZNetView/ZDO,
+    /// is parented to the vehicle, and is destroyed with it -- so it can never orphan or bloat
+    /// the save. Driven from OnBoundsChangeUpdateShipColliders so it tracks the onboard collider.
+    /// </summary>
+    private void UpdateAutoWaterMask()
+    {
+      if (OnboardCollider == null) return;
+
+      if (!WaterConfig.IsVehicleWaterMaskEnabled)
+      {
+        if (_autoWaterMask != null) _autoWaterMask.SetActive(false);
+        return;
+      }
+
+      if (_autoWaterMask == null)
+      {
+        _autoWaterMask = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        _autoWaterMask.name = "VehicleAutoWaterMask";
+
+        var maskCollider = _autoWaterMask.GetComponent<Collider>();
+        if (maskCollider != null) Destroy(maskCollider);
+
+        _autoWaterMask.layer = LayerHelpers.IgnoreRaycastLayer;
+
+        var maskRenderer = _autoWaterMask.GetComponent<MeshRenderer>();
+        maskRenderer.sharedMaterial = ScalableDoubleSidedCube.CubeMaskMaterial;
+        maskRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        maskRenderer.receiveShadows = false;
+        maskRenderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+        maskRenderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+      }
+
+      // Parent to the onboard collider's transform and match its box exactly (size/center),
+      // which is robust to whatever world scale the collider transform carries.
+      _autoWaterMask.transform.SetParent(OnboardCollider.transform, false);
+      _autoWaterMask.transform.localPosition = OnboardCollider.center;
+      _autoWaterMask.transform.localRotation = Quaternion.identity;
+      _autoWaterMask.transform.localScale = OnboardCollider.size;
+      _autoWaterMask.SetActive(true);
     }
 
     public void IgnoreNetViewCollidersForList(ZNetView netView,

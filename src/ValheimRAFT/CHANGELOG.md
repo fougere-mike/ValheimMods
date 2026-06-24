@@ -6,6 +6,27 @@ the [GitHub Releases](https://github.com/zolantris/ValheimMods/releases) page.
 
 ---
 
+## [4.2.8] - 2026-06-24 (fork build)
+
+Follow-up to 4.2.7 after testing: orphan cleanup still skipped, and the hull water was visible.
+
+### Added
+
+- **Automatic ship-shaped water mask.** Each vehicle now maintains a runtime-only, invisible
+  stencil mask sized to its onboard bounds, so the water inside the hull is carved out
+  automatically and keeps matching the ship as you build. It has no ZDO, is parented to the
+  vehicle, and is destroyed with it, so unlike the old manual tool it can never orphan or bloat
+  the save. Driven from `VehiclePiecesController.OnBoundsChangeUpdateShipColliders`; gated by
+  `WaterConfig.IsVehicleWaterMaskEnabled` (OnboardOnly/Everywhere).
+
+### Fixed
+
+- **Orphan cleanup no longer skips itself.** The cleanup was gated partly on the
+  `Water Mask Prefabs Enabled` config, whose old default was `true` and which existing saves
+  keep — so the game thought the manual mask tool was still active and never cleaned anything.
+  Cleanup is now gated only on `UnderwaterAccessMode == DEBUG_WaterZoneOnly`, so leftover manual
+  masks (orphaned strays AND ones attached to a ship) are finally removed in normal play.
+
 ## [4.2.7] - 2026-06-24 (fork build)
 
 Follow-up to 4.2.6 after testing.
