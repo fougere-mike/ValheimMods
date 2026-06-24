@@ -26,6 +26,7 @@ public static class RPCManager_Patches
     PrefabConfigRPC.RegisterAll();
     PowerSystemRPC.RegisterAll();
     PlayerEitrRPC.RegisterAll();
+    VehiclePieceSyncRPC.RegisterAll();
     CannonHandHeldController.RegisterCannonControllerRPCs();
     TargetController.RegisterCannonControllerRPCs();
 

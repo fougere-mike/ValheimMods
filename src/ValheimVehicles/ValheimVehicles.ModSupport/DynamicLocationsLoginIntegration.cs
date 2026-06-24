@@ -16,6 +16,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using ValheimVehicles.BepInExConfig;
 using ValheimVehicles.Controllers;
+using ValheimVehicles.RPC;
 using ValheimVehicles.Shared.Constants;
 using Zolantris.Shared.Debug;
 using Logger = Jotunn.Logger;
@@ -311,6 +312,12 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
   /// True only once the bed's vehicle pieces are fully activated, so the player spawns onto a solid
   /// deck instead of falling through into the water while the boat is still streaming in.
   /// </summary>
+  // Strategy B readiness tracking for the bed's vehicle.
+  private static int _vsrVehicleId;
+  private static int _vsrLastPieceCount;
+  private static int _vsrStableTicks;
+  private static int _vsrRequestTick;
+
   public static bool IsVehicleSpawnReadyForBed(ZDO bedZdo)
   {
     if (ZNetScene.instance == null) return false;
@@ -318,6 +325,56 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     if (!nv) return false;
     var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
     if (vpc == null) return false;
-    return vpc.IsActivationComplete;
+
+    var vehicleId = vpc.PersistentZdoId;
+    if (vehicleId == 0) return false;
+
+    if (vehicleId != _vsrVehicleId)
+    {
+      _vsrVehicleId = vehicleId;
+      _vsrLastPieceCount = -1;
+      _vsrStableTicks = 0;
+      _vsrRequestTick = 0;
+    }
+
+    // Ask the server to bulk force-send EVERY piece of this vehicle (like a relog). The normal sector
+    // sync only trickles ~10-15% of a moving boat's pieces to a respawning client. Throttled (~1s).
+    if (_vsrRequestTick++ % 50 == 0)
+      VehiclePieceSyncRPC.Request(vehicleId);
+
+    // Wait until the known piece count stops growing — i.e. all force-sent pieces have arrived — so we
+    // don't spawn onto a partially-loaded boat. vpc.IsActivationComplete is unreliable here: the
+    // one-shot activation "completes" with whatever ~15% had streamed in and never re-runs.
+    var known =
+      VehiclePiecesController.m_allPieces.TryGetValue(vehicleId, out var list) &&
+      list != null
+        ? list.Count
+        : 0;
+    if (known > 0 && known == _vsrLastPieceCount) _vsrStableTicks++;
+    else _vsrStableTicks = 0;
+    _vsrLastPieceCount = known;
+
+    if (known == 0) return false;
+    if (_vsrStableTicks < 75) return false; // ~1.5s with no new pieces
+
+    // Finally require a SOLID surface beneath the bed spawn point, so the player lands on the boat
+    // instead of falling through into the water.
+    return HasSolidFloorUnderBed(nv, vpc);
+  }
+
+  private static bool HasSolidFloorUnderBed(ZNetView bedNv,
+    VehiclePiecesController vpc)
+  {
+    var bed = bedNv.GetComponent<Bed>();
+    var spawn = bed != null ? bed.GetSpawnPoint() : bedNv.transform.position;
+    var hits = Physics.RaycastAll(spawn + Vector3.up * 1f, Vector3.down, 5f);
+    foreach (var hit in hits)
+    {
+      if (hit.collider == null || hit.collider.isTrigger) continue;
+      if (hit.collider.GetComponentInParent<VehiclePiecesController>() == vpc)
+        return true;
+    }
+
+    return false;
   }
 }
