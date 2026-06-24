@@ -523,7 +523,11 @@ public class PlayerSpawnController : MonoBehaviour
       yield break;
     }
 
-    var timer = DebugSafeTimer.StartNew();
+    // MUST register with the ticked Timers list (StartNew() alone creates a timer whose Update() is
+    // never called, so ElapsedMilliseconds stays 0 and HasExpiredTimer NEVER fires -> the wait loops
+    // below would spin forever and trap the player on a black teleport screen when the boat can't be
+    // streamed in). The controller's Update() ticks this list each frame.
+    var timer = DebugSafeTimer.StartNew(Timers);
     var hasKinematicPlayerFreeze = CanFreezePlayer(freezePlayerOnTeleport);
     var hasKeepPlayerFrozen = CanFreezePlayer(shouldKeepPlayerFrozen);
     if (DynamicLocationsConfig.IsDebug)
@@ -543,15 +547,24 @@ public class PlayerSpawnController : MonoBehaviour
     IsTeleportingToDynamicLocation =
       DynamicTeleport(teleportPosition, zdo.GetRotation());
 
+    // Persistent id of the boat/bed, used to re-request its (live) ZDO from the server while we wait.
+    // The boat is owned by another client, so its current position only reaches us if we keep asking
+    // — otherwise the chase below just follows a stale snapshot the boat has already sailed past.
+    // Zero => not persisted (cannot refresh); we then chase the snapshot only.
+    ZdoWatchController.GetPersistentID(zdo, out var targetPersistentId);
+    var refreshTick = 0;
+
     // Stream-chase the boat while waiting for its zone to load. The boat may be moving — and far
     // away if another player is sailing it — so we re-center the streaming reference on the boat's
     // LIVE zdo position every frame. A one-shot reference set (the old behaviour) lets a moving
     // boat drift out of the streamed zone so it never instantiates and we end up dumped at a stale
-    // spot. Bounded by the same timeout so this loop can never hang (it previously had none).
+    // spot. Bounded by the timeout so this loop can never hang (it previously had none).
     var zoneId = ZoneSystem.GetZone(zdo.GetPosition());
     var zoneLoaded = false;
     while (!zoneLoaded)
     {
+      if (targetPersistentId != 0 && refreshTick++ % 25 == 0)
+        ZdoWatchController.Instance?.RequestZdoFromServer(targetPersistentId);
       var livePos = zdo.GetPosition();
       if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
       // Re-aim the in-flight teleport at the boat's LIVE position too. Vanilla UpdateTeleport snaps
@@ -587,14 +600,19 @@ public class PlayerSpawnController : MonoBehaviour
     ZNetView? zdoNetViewInstance = null;
 
     // Wait for the boat instance to stream in, CHASING the (possibly moving) boat each frame by
-    // re-centering the stream reference on its live position. We deliberately do NOT first wait for
-    // the vanilla distant-teleport to self-complete: its IsAreaReady gate is tied to the teleport
-    // TARGET, but the zone we stream is the boat's LIVE zone (which drifts away from that target on
-    // a far/moving boat) — so the gate never resolves and the player is stuck on a black teleport
-    // screen forever (vanilla's own 15s teleport timeout is unreachable behind the IsAreaReady
-    // gate). Instead we drive completion ourselves: stream the boat in, then cancel the teleport.
+    // re-centering the stream reference on its live position. The boat is owned by another client,
+    // so its LIVE position only reaches us if we keep re-requesting its ZDO from the server (a plain
+    // chase would follow a stale snapshot the boat has already sailed away from). We deliberately do
+    // NOT first wait for the vanilla distant-teleport to self-complete: its IsAreaReady gate is tied
+    // to the teleport TARGET, but the zone we stream is the boat's LIVE zone (which drifts away from
+    // that target on a far/moving boat) — so the gate never resolves and the player is stuck on a
+    // black teleport screen. Instead we drive completion ourselves: stream the boat in, then cancel.
     yield return new WaitUntil(() =>
     {
+      // ~every 0.5s ask the server to force-send the boat's current ZDO so zdo.GetPosition() tracks
+      // the moving boat instead of the position it had when we first resolved it.
+      if (targetPersistentId != 0 && refreshTick++ % 25 == 0)
+        ZdoWatchController.Instance?.RequestZdoFromServer(targetPersistentId);
       var livePos = zdo.GetPosition();
       if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
       if (player != null) player.m_teleportTargetPos = livePos;
