@@ -6,6 +6,27 @@ the [GitHub Releases](https://github.com/zolantris/ValheimMods/releases) page.
 
 ---
 
+## [4.2.7] - 2026-06-24 (fork build)
+
+Follow-up to 4.2.6 after testing.
+
+### Fixed
+
+- OnboardOnly now actually activates on existing saves. The 4.2.6 default change had no effect
+  because BepInEx keeps each save's previously-stored `UnderwaterAccessMode`. Added a one-time
+  migration that switches saves still on `Disabled` or `DEBUG_WaterZoneOnly` over to
+  `OnboardOnly` (deliberate `Everywhere`/`OnboardOnly` choices are left alone).
+- Water-mask cleanup no longer caps at one. Since the manual tool is retired and `OnboardOnly`
+  ignores masks, every placed mask is now vestigial, so cleanup removes them all — both
+  free-floating orphans and ones still attached to a ship (fixes the always-visible light-blue
+  volume on the hull). Cleanup is gated by `IsManualWaterMaskFeatureActive`, so masks are only
+  kept if you are actually in `DEBUG_WaterZoneOnly` mode or have re-enabled the creator tool.
+
+### Removed
+
+- `RemoveAllStaticWaterMasks` config (from 4.2.6) — cleanup is now automatic and mode-gated, so
+  the manual toggle is gone.
+
 ## [4.2.6] - 2026-06-24 (fork build)
 
 ### Changed

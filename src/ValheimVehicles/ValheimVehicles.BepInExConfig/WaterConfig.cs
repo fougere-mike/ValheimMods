@@ -61,13 +61,6 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
     null!;
 
   /// <summary>
-  /// One-time cleanup toggle for stray "water mask" volumes left behind by the deprecated
-  /// manual water-mask tool. Handled by WaterZoneController.RunStrayCleanupSweep.
-  /// </summary>
-  public static ConfigEntry<bool> RemoveAllStaticWaterMasks = null!;
-
-
-  /// <summary>
   /// Waves
   /// </summary>
   public static ConfigEntry<float> DEBUG_WaveSizeMultiplier =
@@ -139,6 +132,16 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
 
   public static bool IsDisabled => UnderwaterAccessMode.Value ==
                                    UnderwaterAccessModeType.Disabled;
+
+  /// <summary>
+  /// The manual water-mask tool is retired. A placed water mask only does anything in
+  /// DEBUG_WaterZoneOnly mode (or if the creator tool has been deliberately re-enabled). When
+  /// neither is true the masks are vestigial, and WaterZoneController removes them on load
+  /// (orphaned strays AND ones still attached to a ship).
+  /// </summary>
+  public static bool IsManualWaterMaskFeatureActive =>
+    UnderwaterAccessMode.Value == UnderwaterAccessModeType.DEBUG_WaterZoneOnly ||
+    CustomMeshConfig.EnableCustomWaterMeshCreators.Value;
 
   public static void InitDebugConfig(ConfigFile config)
   {
@@ -291,13 +294,26 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
         "Controls where water is removed so you can walk instead of swim. OnboardOnly (default) automatically shapes the water-free area to the vehicle you are on and updates it as you add/remove pieces - no tools to place. Everywhere removes water anywhere. Disabled turns the feature off. DEBUG_WaterZoneOnly (manual water-mask boxes) is unfinished and not recommended.",
         true, true));
 
-    RemoveAllStaticWaterMasks = config.BindUnique(
+    // One-time migration: BepInEx keeps each save's existing UnderwaterAccessMode value, so
+    // flipping the default to OnboardOnly never reaches existing users. Switch saves that are
+    // still on the old default (Disabled) or the abandoned manual-mask mode (DEBUG_WaterZoneOnly)
+    // over to OnboardOnly, exactly once. Deliberate Everywhere/OnboardOnly choices are untouched.
+    var appliedOnboardOnlyMigration = config.BindUnique(
       SectionKey,
-      "RemoveAllStaticWaterMasks",
+      "_AppliedOnboardOnlyMigration",
       false,
       ConfigHelpers.CreateConfigDescription(
-        "One-time cleanup. When enabled, removes stray 'water mask' volumes that are NOT attached to a vehicle (left over from the deprecated water-mask tool). Enable it, load near the stray volume so it gets cleaned, then turn it back off. As a safety measure the cleanup refuses to act if it ever detects more than one stray volume.",
+        "Internal bookkeeping for the one-time switch to the OnboardOnly water mode. Do not edit.",
         true, true));
+    if (!appliedOnboardOnlyMigration.Value)
+    {
+      if (UnderwaterAccessMode.Value == UnderwaterAccessModeType.Disabled ||
+          UnderwaterAccessMode.Value == UnderwaterAccessModeType.DEBUG_WaterZoneOnly)
+      {
+        UnderwaterAccessMode.Value = UnderwaterAccessModeType.OnboardOnly;
+      }
+      appliedOnboardOnlyMigration.Value = true;
+    }
 
     HasUnderwaterHullBubbleEffect = config.BindUnique(
       SectionKey,
