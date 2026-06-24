@@ -554,6 +554,11 @@ public class PlayerSpawnController : MonoBehaviour
     {
       var livePos = zdo.GetPosition();
       if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
+      // Re-aim the in-flight teleport at the boat's LIVE position too. Vanilla UpdateTeleport snaps
+      // the player to m_teleportTargetPos each frame; keeping it on the live boat means the player's
+      // own position can't pin the stream reference to the stale spot (same proven approach as the
+      // vehicle-portal Teleport_Patch). m_teleportTargetPos is publicized.
+      if (player != null) player.m_teleportTargetPos = livePos;
       zoneId = ZoneSystem.GetZone(livePos);
       ZoneSystem.instance.PokeLocalZone(zoneId);
       zoneLoaded = ZoneSystem.instance.IsZoneLoaded(zoneId);
@@ -580,28 +585,30 @@ public class PlayerSpawnController : MonoBehaviour
     }
 
     ZNetView? zdoNetViewInstance = null;
-    var isZoneLoaded = false;
 
-    zoneId = ZoneSystem.GetZone(zdo.GetPosition());
-    ZoneSystem.instance.PokeLocalZone(zoneId);
-
-    yield return new WaitUntil(() =>
-      Player.m_localPlayer.IsTeleporting() == false || HasExpiredTimer(timer,
-        DynamicLocationsConfig.LocationControlsTimeoutInMs.Value));
-
-    zdoNetViewInstance = ZNetScene.instance.FindInstance(zdo);
-
+    // Wait for the boat instance to stream in, CHASING the (possibly moving) boat each frame by
+    // re-centering the stream reference on its live position. We deliberately do NOT first wait for
+    // the vanilla distant-teleport to self-complete: its IsAreaReady gate is tied to the teleport
+    // TARGET, but the zone we stream is the boat's LIVE zone (which drifts away from that target on
+    // a far/moving boat) — so the gate never resolves and the player is stuck on a black teleport
+    // screen forever (vanilla's own 15s teleport timeout is unreachable behind the IsAreaReady
+    // gate). Instead we drive completion ourselves: stream the boat in, then cancel the teleport.
     yield return new WaitUntil(() =>
     {
-      // Keep chasing the (possibly moving) boat while its instance streams in — same reasoning as
-      // the zone-wait loop above. Without this a boat sailed away by another player never appears.
       var livePos = zdo.GetPosition();
       if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
+      if (player != null) player.m_teleportTargetPos = livePos;
       ZoneSystem.instance.PokeLocalZone(ZoneSystem.GetZone(livePos));
       zdoNetViewInstance = ZNetScene.instance.FindInstance(zdo);
       return zdoNetViewInstance != null || HasExpiredTimer(timer,
         DynamicLocationsConfig.LocationControlsTimeoutInMs.Value);
     });
+
+    // Take over from the vanilla distant-teleport: cancel it so the black teleport/loading screen
+    // lifts (we set the final position ourselves below). This runs on BOTH the success and the
+    // timeout-bail paths, so a dynamic spawn can never leave the player trapped on a black screen
+    // waiting on an IsAreaReady that will never resolve.
+    if (player != null) player.m_teleporting = false;
 
     if (HasExpiredTimer(timer,
           DynamicLocationsConfig.LocationControlsTimeoutInMs.Value))

@@ -1,6 +1,6 @@
 {
   "name": "ValheimRAFT",
-  "version_number": "4.2.10",
+  "version_number": "4.2.11",
   "website_url": "https://github.com/fougere-mike/ValheimMods/tree/fix/raft-respawn-4.2.2/src/ValheimRAFT",
   "description": "ValheimRAFT 4.2.2 + fixes for (a) respawn/logout on moving boats (#76), (b) infinite loading screen on death-respawn near a raft, and (c) automatic ship-shaped water removal (OnboardOnly) plus cleanup of orphaned water-mask volumes. Private fork build - not for public release.",
   "dependencies": [
