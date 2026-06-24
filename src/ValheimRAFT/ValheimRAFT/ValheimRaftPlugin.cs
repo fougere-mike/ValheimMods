@@ -188,8 +188,14 @@ public class ValheimRaftPlugin : BaseUnityPlugin
     // Death-respawn on a moving boat: after the coarse teleport, place the player on the live bed
     // and parent + onboard them so the moving boat carries them (the plain path only set the
     // position once, leaving the player behind in the water). See OnSpawnMoveToVehicleZdo.
+    // Used as the Strategy B fallback when the boat could not be streamed in before the spawn.
     PlayerSpawnController.OnSpawnMoveToVehicle =
       DynamicLocationsLoginIntegration.OnSpawnMoveToVehicleZdo;
+
+    // Strategy B onboard step: vanilla FindSpawnPoint already spawned the player on the live bed, so
+    // this only parents + onboards them to the boat (no teleport). See OnSpawnOnboardToVehicleZdo.
+    PlayerSpawnController.OnSpawnOnboardToVehicle =
+      DynamicLocationsLoginIntegration.OnSpawnOnboardToVehicleZdo;
   }
 
 

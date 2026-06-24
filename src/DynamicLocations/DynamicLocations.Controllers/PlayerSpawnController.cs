@@ -52,6 +52,15 @@ public class PlayerSpawnController : MonoBehaviour
   public static System.Func<ZDO, Vector3?, PlayerSpawnController, IEnumerator>?
     OnSpawnMoveToVehicle;
 
+  /// <summary>
+  /// Assigned by the vehicle mod for the Strategy B path: after vanilla FindSpawnPoint has already
+  /// spawned the player ON the live bed (see <see cref="DynamicSpawnResolver" />), this only onboards
+  /// them (parents to the boat) and refines the placement — NO teleport. When null, the player just
+  /// stays where vanilla placed them on the boat.
+  /// </summary>
+  public static System.Func<ZDO, PlayerSpawnController, IEnumerator>?
+    OnSpawnOnboardToVehicle;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;

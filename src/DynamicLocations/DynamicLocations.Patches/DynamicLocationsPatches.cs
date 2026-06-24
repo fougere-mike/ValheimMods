@@ -107,6 +107,12 @@ public class DynamicLocationsPatches
       return;
     }
 
+    // Strategy B: capture the boat-bed spawn target NOW, while the player still exists. During the
+    // respawn the player is destroyed, so Game.FindSpawnPoint cannot read m_customData — the resolver
+    // uses this cached id to stream the boat in and spawn the player directly on the live bed.
+    if (__instance == Player.m_localPlayer)
+      DynamicSpawnResolver.BeginDeathRespawn(__instance);
+
     try
     {
       LocationController.RemoveZdoTarget(
@@ -115,6 +121,45 @@ public class DynamicLocationsPatches
     catch (Exception e)
     {
       LoggerProvider.LogError($"Error occurred while removing a zdotarget. \n{e}");
+    }
+  }
+
+  /// <summary>
+  /// Strategy B: spawn the player directly on the LIVE boat bed via vanilla FindSpawnPoint instead
+  /// of teleporting after the fact. Delegates to <see cref="DynamicSpawnResolver" />; when there is
+  /// no registered boat-bed death spawn (or it times out) this is a no-op and vanilla runs unchanged,
+  /// so land beds and normal respawns are byte-for-byte vanilla.
+  /// </summary>
+  [HarmonyPatch(typeof(Game), "FindSpawnPoint")]
+  [HarmonyPrefix]
+  private static bool FindSpawnPoint_Prefix(Game __instance, ref Vector3 point,
+    ref bool usedLogoutPoint, float dt, ref bool __result)
+  {
+    try
+    {
+      var result =
+        DynamicSpawnResolver.TryResolveDeathSpawn(__instance, dt, out var resolved);
+      switch (result)
+      {
+        case DynamicSpawnResolver.Result.NotOurs:
+          return true; // run vanilla FindSpawnPoint unchanged
+        case DynamicSpawnResolver.Result.Ready:
+          point = resolved;
+          usedLogoutPoint = false;
+          __result = true; // vanilla UpdateRespawn now spawns the player on the live bed
+          return false;
+        default: // Waiting — keep the player on the respawn screen while the boat streams in
+          point = Vector3.zero;
+          __result = false;
+          return false;
+      }
+    }
+    catch (Exception e)
+    {
+      // Never trap the player on the death screen: on any error fall back to vanilla.
+      Logger.LogError(
+        $"[DynamicSpawnResolver] FindSpawnPoint prefix error, falling back to vanilla.\n{e}");
+      return true;
     }
   }
 
@@ -232,7 +277,24 @@ public class DynamicLocationsPatches
              DynamicLocationsConfig.EnableDynamicSpawnPoint.Value &&
              !character.InIntro())
     {
-      PlayerSpawnController.Instance.MovePlayerToSpawnPoint();
+      if (DynamicSpawnResolver.LastRespawnHandledByStrategyB &&
+          DynamicSpawnResolver.ResolvedBedZdo != null)
+      {
+        // Strategy B already spawned the player on the live bed via FindSpawnPoint. Only onboard
+        // them (parent to the boat so it carries them) — no teleport. No-op without the vehicle mod.
+        var onboard = PlayerSpawnController.OnSpawnOnboardToVehicle;
+        if (onboard != null)
+          PlayerSpawnController.Instance.StartCoroutine(
+            onboard(DynamicSpawnResolver.ResolvedBedZdo, PlayerSpawnController.Instance));
+      }
+      else
+      {
+        // Strategy B did not handle this respawn (no boat bed, or it timed out and vanilla spawned
+        // the player at the normal spawn) — fall back to the legacy post-spawn teleport.
+        PlayerSpawnController.Instance.MovePlayerToSpawnPoint();
+      }
+
+      DynamicSpawnResolver.Reset();
     }
   }
 

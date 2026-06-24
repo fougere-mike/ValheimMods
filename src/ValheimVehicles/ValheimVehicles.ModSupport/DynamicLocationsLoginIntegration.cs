@@ -239,4 +239,60 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     if (player.IsDebugFlying()) player.ToggleDebugFly();
     if (player.m_body != null) player.m_body.isKinematic = false;
   }
+
+  /// <summary>
+  /// Strategy B onboard step (assigned to <see cref="PlayerSpawnController.OnSpawnOnboardToVehicle" />
+  /// in ValheimRaftPlugin). Vanilla FindSpawnPoint already spawned the player ON the live bed, so
+  /// there is NO teleport here: resolve the bed's vehicle, refine the placement once pieces have
+  /// activated, and onboard the player so the moving boat carries them
+  /// (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard).
+  /// </summary>
+  public static IEnumerator OnSpawnOnboardToVehicleZdo(ZDO bedZdo,
+    PlayerSpawnController playerSpawnController)
+  {
+    var localTimer = Stopwatch.StartNew();
+    var player = Player.m_localPlayer;
+    if (player == null) yield break;
+
+    // The boat was streamed in before the spawn, so its pieces controller should already exist;
+    // allow a brief retry just in case.
+    VehiclePiecesController? vpc = null;
+    while (vpc == null && localTimer.ElapsedMilliseconds < 5000)
+    {
+      var nv = ZNetScene.instance.FindInstance(bedZdo);
+      if (nv != null)
+        vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+      if (vpc == null) yield return new WaitForFixedUpdate();
+    }
+
+    if (vpc == null) yield break;
+
+    yield return new WaitUntil(() =>
+      vpc == null ||
+      vpc.isInitialPieceActivationComplete || vpc.IsActivationComplete ||
+      localTimer.ElapsedMilliseconds > 8000);
+
+    if (vpc == null || player == null) yield break;
+
+    // Refine onto the LIVE bed (it may have shifted as pieces activated) and onboard.
+    var bedNetView = ZNetScene.instance.FindInstance(bedZdo);
+    var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
+    if (bed != null)
+      player.transform.position = bed.GetSpawnPoint() +
+                                  Vector3.up *
+                                  DynamicLocationsConfig.RespawnHeightOffset.Value;
+
+    if (vpc.OnboardController != null)
+      vpc.OnboardController.TryAddPlayerIfMissing(player);
+    else
+      player.transform.SetParent(vpc.transform);
+
+    if (player.m_body != null)
+    {
+      player.m_body.velocity = Vector3.zero;
+      player.m_body.angularVelocity = Vector3.zero;
+    }
+
+    playerSpawnController.SyncPlayerPosition(player.transform.position);
+  }
 }
