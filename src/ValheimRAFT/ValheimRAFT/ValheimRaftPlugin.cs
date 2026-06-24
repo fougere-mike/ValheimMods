@@ -196,6 +196,11 @@ public class ValheimRaftPlugin : BaseUnityPlugin
     // this only parents + onboards them to the boat (no teleport). See OnSpawnOnboardToVehicleZdo.
     PlayerSpawnController.OnSpawnOnboardToVehicle =
       DynamicLocationsLoginIntegration.OnSpawnOnboardToVehicleZdo;
+
+    // Strategy B readiness gate: don't spawn the player until the bed's vehicle pieces are activated,
+    // so they land on a solid deck instead of falling through the water while the boat streams in.
+    PlayerSpawnController.IsVehicleSpawnReady =
+      DynamicLocationsLoginIntegration.IsVehicleSpawnReadyForBed;
   }
 
 

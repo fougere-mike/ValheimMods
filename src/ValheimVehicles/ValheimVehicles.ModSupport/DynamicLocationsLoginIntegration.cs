@@ -250,12 +250,18 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
   public static IEnumerator OnSpawnOnboardToVehicleZdo(ZDO bedZdo,
     PlayerSpawnController playerSpawnController)
   {
-    var localTimer = Stopwatch.StartNew();
     var player = Player.m_localPlayer;
     if (player == null) yield break;
 
-    // The boat was streamed in before the spawn, so its pieces controller should already exist;
-    // allow a brief retry just in case.
+    // Freeze immediately: the player was spawned at the bed's world position, but the boat may be
+    // moving, so an un-parented player would slide off the deck (or drop a frame) before we parent
+    // them. Held kinematic until parented + re-placed below; released on every exit.
+    if (player.m_body != null) player.m_body.isKinematic = true;
+
+    var localTimer = Stopwatch.StartNew();
+
+    // The boat was streamed AND its pieces activated before the spawn (the resolver gated on
+    // IsVehicleSpawnReady), so the pieces controller should already exist; allow a brief retry.
     VehiclePiecesController? vpc = null;
     while (vpc == null && localTimer.ElapsedMilliseconds < 5000)
     {
@@ -265,34 +271,53 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
       if (vpc == null) yield return new WaitForFixedUpdate();
     }
 
-    if (vpc == null) yield break;
-
-    yield return new WaitUntil(() =>
-      vpc == null ||
-      vpc.isInitialPieceActivationComplete || vpc.IsActivationComplete ||
-      localTimer.ElapsedMilliseconds > 8000);
-
-    if (vpc == null || player == null) yield break;
-
-    // Refine onto the LIVE bed (it may have shifted as pieces activated) and onboard.
-    var bedNetView = ZNetScene.instance.FindInstance(bedZdo);
-    var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
-    if (bed != null)
-      player.transform.position = bed.GetSpawnPoint() +
-                                  Vector3.up *
-                                  DynamicLocationsConfig.RespawnHeightOffset.Value;
-
-    if (vpc.OnboardController != null)
-      vpc.OnboardController.TryAddPlayerIfMissing(player);
-    else
-      player.transform.SetParent(vpc.transform);
-
-    if (player.m_body != null)
+    if (vpc != null)
     {
+      yield return new WaitUntil(() =>
+        vpc == null || vpc.IsActivationComplete ||
+        localTimer.ElapsedMilliseconds > 8000);
+
+      if (vpc != null && player != null)
+      {
+        // Refine onto the LIVE bed (it may have shifted while activating) and onboard so the parent
+        // sticks (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard).
+        var bedNetView = ZNetScene.instance.FindInstance(bedZdo);
+        var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
+        if (bed != null)
+          player.transform.position = bed.GetSpawnPoint() +
+                                      Vector3.up *
+                                      DynamicLocationsConfig.RespawnHeightOffset.Value;
+
+        if (vpc.OnboardController != null)
+          vpc.OnboardController.TryAddPlayerIfMissing(player);
+        else
+          player.transform.SetParent(vpc.transform);
+
+        playerSpawnController.SyncPlayerPosition(player.transform.position);
+      }
+    }
+
+    // Always release the freeze (every exit path leads here).
+    if (player != null && player.m_body != null)
+    {
+      player.m_body.isKinematic = false;
       player.m_body.velocity = Vector3.zero;
       player.m_body.angularVelocity = Vector3.zero;
     }
+  }
 
-    playerSpawnController.SyncPlayerPosition(player.transform.position);
+  /// <summary>
+  /// Strategy B spawn-readiness gate (assigned to <see cref="PlayerSpawnController.IsVehicleSpawnReady" />).
+  /// True only once the bed's vehicle pieces are fully activated, so the player spawns onto a solid
+  /// deck instead of falling through into the water while the boat is still streaming in.
+  /// </summary>
+  public static bool IsVehicleSpawnReadyForBed(ZDO bedZdo)
+  {
+    if (ZNetScene.instance == null) return false;
+    var nv = ZNetScene.instance.FindInstance(bedZdo);
+    if (!nv) return false;
+    var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+    if (vpc == null) return false;
+    return vpc.IsActivationComplete;
   }
 }

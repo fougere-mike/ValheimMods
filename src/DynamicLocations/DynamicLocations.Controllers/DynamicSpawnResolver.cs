@@ -117,8 +117,17 @@ public static class DynamicSpawnResolver
     if (instance == null) return Result.Waiting;                 // bed not instantiated yet
     if (!ZNetScene.instance.IsAreaReady(livePos)) return Result.Waiting;
 
-    // Live bed transform — follows the boat (the ZNetScene_IsAreaReady_Patch lets the area report
-    // ready once non-vehicle objects load, so we are not blocked on every raft piece).
+    // CRITICAL: do not spawn until the boat's PIECES have activated (the deck has colliders). The
+    // ZNetScene_IsAreaReady_Patch deliberately reports the area ready while vehicle pieces are still
+    // streaming, so IsAreaReady alone places the player on the bed before the floor exists and they
+    // fall through into the water — and once they're alive-in-the-water the boat unloads and sails
+    // off. PlayerSpawnController.IsVehicleSpawnReady (assigned by the vehicle mod) returns true only
+    // once the bed's vehicle is fully activated.
+    if (PlayerSpawnController.IsVehicleSpawnReady != null &&
+        !PlayerSpawnController.IsVehicleSpawnReady(zdo))
+      return Result.Waiting;
+
+    // Live bed transform — follows the boat.
     var bed = instance.GetComponent<Bed>();
     var basePos = bed != null ? bed.GetSpawnPoint() : instance.transform.position;
     point = basePos + Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;

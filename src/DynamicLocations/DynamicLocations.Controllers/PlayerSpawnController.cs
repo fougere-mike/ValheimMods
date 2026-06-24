@@ -61,6 +61,13 @@ public class PlayerSpawnController : MonoBehaviour
   public static System.Func<ZDO, PlayerSpawnController, IEnumerator>?
     OnSpawnOnboardToVehicle;
 
+  /// <summary>
+  /// Assigned by the vehicle mod. Given a bed ZDO, returns true only once the bed's vehicle is fully
+  /// activated (deck/colliders present). Strategy B waits on this before spawning the player so they
+  /// land on a solid deck instead of falling through into the water while the boat streams in.
+  /// </summary>
+  public static System.Func<ZDO, bool>? IsVehicleSpawnReady;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;
