@@ -61,7 +61,7 @@
     public WaterZoneCharacterData(Character characterInstance,
       WaterZoneController? waterZoneController = null)
     {
-      waterZoneController = waterZoneController;
+      WaterZoneController = waterZoneController;
       character = characterInstance;
       zdoId = character.GetZDOID();
       OnboardController = null;

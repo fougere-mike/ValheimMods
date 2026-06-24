@@ -24,7 +24,16 @@ public class CustomMeshPrefabs : RegisterPrefab<CustomMeshPrefabs>
 
   public override void OnRegister()
   {
-    RegisterWaterMaskCreator();
+    // The manual water-mask creator tool is deprecated in favour of the automatic
+    // OnboardOnly underwater mode. Keep it off by default but allow opting back in.
+    if (CustomMeshConfig.EnableCustomWaterMeshCreators.Value)
+    {
+      RegisterWaterMaskCreator();
+    }
+
+    // Always register the mask prefab itself so existing saved masks can still load
+    // (and be cleaned up by the stray-cleanup sweep). Without it ZNetScene errors on the
+    // unknown prefab hash.
     RegisterWaterMaskPrefab();
     RegisterCustomFloatationPrefab();
     RegisterShipChunkBoundary8x8();

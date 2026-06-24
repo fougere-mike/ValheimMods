@@ -13,6 +13,7 @@ using ValheimVehicles.SharedScripts;
 using ValheimVehicles.Controllers;
 using ValheimVehicles.Shared.Constants;
 using ValheimVehicles.Structs;
+using ZdoWatcher;
 using Zolantris.Shared;
 using Logger = Jotunn.Logger;
 
@@ -65,6 +66,8 @@ public class WaterZoneController : CreativeModeColliderComponent
     if (_onboardController) zoneType = WaterZoneControllerType.Vehicle;
 
     InitMaskFromNetview();
+
+    ScheduleStrayCleanupSweep();
   }
 
   private static bool IsInWaterFreeZone(Character character)
@@ -179,13 +182,15 @@ public class WaterZoneController : CreativeModeColliderComponent
     var character = collider.GetComponent<Character>();
     if (character == null) return;
 
-    if (!WaterZoneCharacterData.TryGetValue(instanceZdoid, out var data))
+    var characterZdoid = character.GetZDOID();
+    if (!WaterZoneCharacterData.TryGetValue(characterZdoid, out var data))
       return;
 
-    // only removes the instance associated with it.
-    if (data.controllerZdoId != instanceZdoid &&
-        Instances.ContainsKey(instanceZdoid)) return;
-    WaterZoneCharacterData.Remove(instanceZdoid);
+    // only remove the character if it was registered to THIS zone, so overlapping zones
+    // do not yank each other's characters out.
+    if (data.controllerZdoId != instanceZdoid) return;
+
+    WaterZoneCharacterData.Remove(characterZdoid);
   }
 
   public static void OnToggleEditMode(bool isDebug)
@@ -293,4 +298,106 @@ public class WaterZoneController : CreativeModeColliderComponent
     else
       UseHiddenComponents();
   }
+
+  #region Stray-mask cleanup
+
+  // Delay before running the sweep so nearby masks register into Instances and parent
+  // vehicles have a chance to load/re-parent before we judge anything an orphan.
+  private const float StrayCleanupDelaySeconds = 5f;
+
+  private static bool _hasScheduledStrayCleanup;
+
+  private void ScheduleStrayCleanupSweep()
+  {
+    if (_hasScheduledStrayCleanup) return;
+    _hasScheduledStrayCleanup = true;
+    Invoke(nameof(InvokeStrayCleanupSweep), StrayCleanupDelaySeconds);
+  }
+
+  private void InvokeStrayCleanupSweep()
+  {
+    // allow rescheduling if more masks load later in the session
+    _hasScheduledStrayCleanup = false;
+    RunStrayCleanupSweep();
+  }
+
+  /// <summary>
+  /// Removes leftover "water mask" volumes that are not attached to a live vehicle.
+  /// Safety: there should only ever be a single stray volume. If more than one candidate is
+  /// found this refuses to delete anything (a sign the detection logic is wrong) and warns.
+  /// </summary>
+  public static void RunStrayCleanupSweep()
+  {
+    if (ZNetScene.instance == null) return;
+
+    var candidates = Instances.Values
+      .Where(controller => controller != null && controller.IsStrayCandidate())
+      .ToList();
+
+    if (candidates.Count == 0) return;
+
+    if (candidates.Count > 1)
+    {
+      Logger.LogWarning(
+        $"[WaterMask cleanup] Expected at most ONE stray water mask but found {candidates.Count}. Refusing to delete anything to avoid removing valid volumes. Candidates: {string.Join(" | ", candidates.Select(c => c.DescribeForLog()))}");
+      return;
+    }
+
+    var stray = candidates[0];
+    Logger.LogInfo(
+      $"[WaterMask cleanup] Removing 1 stray water mask: {stray.DescribeForLog()}");
+    stray.DestroySelfNetworked();
+  }
+
+  /// <summary>
+  /// A mask is a stray-cleanup candidate when it is not attached to a live vehicle AND either
+  /// its parent vehicle is confirmed gone (true orphan), or the one-time
+  /// RemoveAllStaticWaterMasks toggle is enabled (catches fully-detached garbage that never
+  /// had a parent link).
+  /// </summary>
+  private bool IsStrayCandidate()
+  {
+    if (netView == null) return false;
+    var zdo = netView.GetZDO();
+    if (zdo == null) return false;
+
+    // Attached to a live vehicle -> never a candidate.
+    if (_onboardController != null) return false;
+    if (zoneType == WaterZoneControllerType.Vehicle) return false;
+    if (GetComponentInParent<VehiclePiecesController>() != null) return false;
+
+    var parentId = VehiclePiecesController.GetParentID(zdo);
+
+    // True orphan: it had a parent vehicle, but that vehicle no longer exists.
+    if (parentId != 0 && ZdoWatchController.Instance != null &&
+        ZdoWatchController.Instance.GetZdo(parentId) == null)
+    {
+      return true;
+    }
+
+    // Opt-in purge of all non-vehicle masks (covers detached parentId == 0 garbage).
+    return WaterConfig.RemoveAllStaticWaterMasks.Value;
+  }
+
+  private void DestroySelfNetworked()
+  {
+    if (netView == null || netView.GetZDO() == null)
+    {
+      Destroy(gameObject);
+      return;
+    }
+
+    if (!netView.IsOwner()) netView.ClaimOwnership();
+    ZNetScene.instance.Destroy(gameObject);
+  }
+
+  private string DescribeForLog()
+  {
+    var id = netView != null && netView.GetZDO() != null
+      ? netView.GetZDO().m_uid.ToString()
+      : "<no-zdo>";
+    return $"zdoid={id} pos={transform.position}";
+  }
+
+  #endregion
 }

@@ -6,6 +6,29 @@ the [GitHub Releases](https://github.com/zolantris/ValheimMods/releases) page.
 
 ---
 
+## [4.2.6] - 2026-06-24 (fork build)
+
+### Changed
+
+- Water removal now works automatically from the ship's geometry. `UnderwaterAccessMode`
+  defaults to `OnboardOnly`, which shapes the water-free area to the vehicle's auto-rebuilt
+  onboard collider and updates it as you add/remove pieces — no tool to place.
+- Retired the manual 8-corner water-mask creator tool (it was unfinished and buggy). It is
+  now hidden from the hammer build menu by default behind `CustomMesh.Water Mask Prefabs
+  Enabled` (default off); the mask prefab itself is still registered so existing saved masks
+  load.
+
+### Fixed
+
+- Orphaned/leftover "water mask" volumes are cleaned up. A new one-time
+  `RemoveAllStaticWaterMasks` toggle removes stray volumes not attached to a vehicle; volumes
+  whose parent ship is gone are auto-removed. As a safety measure the cleanup refuses to act
+  if it ever finds more than one stray volume.
+- `WaterZoneController.OnTriggerExit` no longer keyed off the zone's own ZDO id, so characters
+  are correctly removed from a water zone on exit (fixes the stuck half-swim/half-walk state).
+- Fixed a self-assignment in `WaterZoneCharacterData` that left the back-reference to its
+  `WaterZoneController` unset.
+
 ## [4.2.2] - 2026-03-14
 
 ### Fixed

@@ -20,9 +20,9 @@ public class CustomMeshConfig : BepInExBaseConfig<CustomMeshConfig>
     EnableCustomWaterMeshCreators = config.BindUnique(
       SectionKey,
       "Water Mask Prefabs Enabled",
-      true,
+      false,
       ConfigHelpers.CreateConfigDescription(
-        "Allows placing a dynamically sized cube that removes all water meshes intersecting with it. This also removes all water meshes when looking through it. So use it wisely, it's not perfect",
+        "DEPRECATED/EXPERIMENTAL. Adds the manual water-mask creator tool (place 8 corners to carve a water-free box) to the hammer build menu. This tool is unfinished and buggy and has been replaced by the automatic OnboardOnly underwater mode, which shapes the water-free area to the vehicle automatically. Leave disabled unless you know what you are doing.",
         true));
     EnableCustomWaterMeshTestPrefabs = config.BindUnique(
       SectionKey,

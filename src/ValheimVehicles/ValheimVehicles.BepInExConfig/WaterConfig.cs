@@ -60,6 +60,12 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
   public static ConfigEntry<UnderwaterAccessModeType> UnderwaterAccessMode =
     null!;
 
+  /// <summary>
+  /// One-time cleanup toggle for stray "water mask" volumes left behind by the deprecated
+  /// manual water-mask tool. Handled by WaterZoneController.RunStrayCleanupSweep.
+  /// </summary>
+  public static ConfigEntry<bool> RemoveAllStaticWaterMasks = null!;
+
 
   /// <summary>
   /// Waves
@@ -280,9 +286,17 @@ public class WaterConfig : BepInExBaseConfig<WaterConfig>
     UnderwaterAccessMode = config.BindUnique(
       SectionKey,
       "UnderwaterAccessMode",
-      UnderwaterAccessModeType.Disabled,
+      UnderwaterAccessModeType.OnboardOnly,
       ConfigHelpers.CreateConfigDescription(
-        "Allows for walking underwater, anywhere, or onship, or eventually within the water displaced area only. Disabled with remove all water logic. DEBUG_WaterZoneOnly is not supported yet",
+        "Controls where water is removed so you can walk instead of swim. OnboardOnly (default) automatically shapes the water-free area to the vehicle you are on and updates it as you add/remove pieces - no tools to place. Everywhere removes water anywhere. Disabled turns the feature off. DEBUG_WaterZoneOnly (manual water-mask boxes) is unfinished and not recommended.",
+        true, true));
+
+    RemoveAllStaticWaterMasks = config.BindUnique(
+      SectionKey,
+      "RemoveAllStaticWaterMasks",
+      false,
+      ConfigHelpers.CreateConfigDescription(
+        "One-time cleanup. When enabled, removes stray 'water mask' volumes that are NOT attached to a vehicle (left over from the deprecated water-mask tool). Enable it, load near the stray volume so it gets cleaned, then turn it back off. As a safety measure the cleanup refuses to act if it ever detects more than one stray volume.",
         true, true));
 
     HasUnderwaterHullBubbleEffect = config.BindUnique(
