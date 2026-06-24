@@ -6,6 +6,22 @@ the [GitHub Releases](https://github.com/zolantris/ValheimMods/releases) page.
 
 ---
 
+## [4.2.9] - 2026-06-24 (fork build)
+
+### Reverted
+
+- Removed the automatic ship-shaped water mask added in 4.2.8. A box-shaped stencil mask is the
+  wrong tool for an enclosed hull: with the camera inside the box (standing below deck) it culls
+  the entire ocean, and it hides water beyond the box rather than the water at your feet. Truly
+  rendering a dry room below sea level while keeping the ocean visible outside is not something
+  the mask tech supports, so the box is gone.
+
+The solid behaviour stays: `OnboardOnly` (walk instead of swim on a vehicle) is the default via
+the one-time migration, and leftover manual water masks (orphaned or ship-attached) are cleaned
+up on load. Hull water is visible again but you no longer swim in it. The mod's underwater
+*ambiance* options (`FlipWatermeshMode`, `UnderwaterFogEnabled`, `HasUnderwaterHullBubbleEffect`)
+remain available as config toggles.
+
 ## [4.2.8] - 2026-06-24 (fork build)
 
 Follow-up to 4.2.7 after testing: orphan cleanup still skipped, and the hull water was visible.
