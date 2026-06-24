@@ -29,6 +29,8 @@ public static class PatchController
       typeof(Teleport_Patch),
       typeof(WearNTear_Patch),
       typeof(ZNetScene_Patch),
+      // fixes infinite loading screen on respawn/teleport near a raft (IsAreaReady gate)
+      typeof(ZNetScene_IsAreaReady_Patch),
       typeof(ZNetView_Patch),
       typeof(Hud_Patch),
       typeof(MonoUpdaterPatches),
