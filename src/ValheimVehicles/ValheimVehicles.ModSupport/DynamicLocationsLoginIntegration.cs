@@ -5,6 +5,7 @@ using System.Linq;
 using BepInEx;
 using ValheimVehicles.Components;
 using DynamicLocations.API;
+using DynamicLocations.Config;
 using DynamicLocations.Constants;
 using DynamicLocations.Controllers;
 using DynamicLocations.Interfaces;
@@ -150,5 +151,92 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     if (!vehicleShipNetView) return null;
     var vehicleShip = vehicleShipNetView.GetComponent<VehicleManager>();
     return vehicleShip;
+  }
+
+  /// <summary>
+  /// Death-respawn finalizer for a BED zdo on a vehicle (assigned to
+  /// <see cref="PlayerSpawnController.OnSpawnMoveToVehicle" /> in ValheimRaftPlugin). The plain
+  /// spawn path only set the player position once, so on a moving boat the player was left behind
+  /// in the water. This mirrors the login finalizer (<see cref="OnLoginMoveToZDO" />) but keyed on
+  /// the bed: coarse-place + stream-chase via MovePlayerToZdo, wait for the bed's vehicle pieces to
+  /// activate, then place the player on the LIVE bed spawn point and ONBOARD them so the moving boat
+  /// carries them (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard, so
+  /// a bare SetParent is undone next frame). The player is held kinematic across the wait so they
+  /// cannot fall into the water, and is ALWAYS unfrozen on exit (never trapped on the death screen).
+  /// </summary>
+  public static IEnumerator OnSpawnMoveToVehicleZdo(ZDO zdo, Vector3? offset,
+    PlayerSpawnController playerSpawnController)
+  {
+    var localTimer = Stopwatch.StartNew();
+
+    // Coarse placement + freeze. MovePlayerToZdo now stream-chases a moving/far boat until its
+    // instance loads, and leaves the player on the bed at a coarse position.
+    yield return playerSpawnController.MovePlayerToZdo(zdo, offset, true, true);
+
+    var player = Player.m_localPlayer;
+    // Hold the player still while the vehicle pieces activate so a moving boat / the water cannot
+    // drag them off before we do the final placement + onboard below.
+    if (player != null && player.m_body != null) player.m_body.isKinematic = true;
+
+    // Resolve the bed instance's vehicle pieces controller (retry while it streams in).
+    VehiclePiecesController? vpc = null;
+    while (vpc == null && localTimer.ElapsedMilliseconds < 5000)
+    {
+      var nv = ZNetScene.instance.FindInstance(zdo);
+      if (nv != null)
+        vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+      if (vpc == null) yield return new WaitForFixedUpdate();
+    }
+
+    if (vpc == null)
+    {
+      // Boat never streamed in (sank / destroyed / unreachable). Unfreeze and leave the player at
+      // the coarse position — never trapped frozen on the death screen.
+      UnfreezeSpawnedPlayer(player);
+      yield break;
+    }
+
+    // Wait for the pieces to finish activating so the bed (and its live m_spawnPoint) is in place.
+    yield return new WaitUntil(() =>
+      vpc == null ||
+      vpc.isInitialPieceActivationComplete || vpc.IsActivationComplete ||
+      localTimer.ElapsedMilliseconds > 8000);
+
+    if (vpc != null && player != null)
+    {
+      var bedNetView = ZNetScene.instance.FindInstance(zdo);
+      var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
+      // Use the LIVE bed spawn point (it follows the moving boat). The stored Spawn offset is a
+      // meaningless world-delta from SyncBedSpawnPoint, so it is intentionally not used here.
+      var basePos = bed != null ? bed.GetSpawnPoint() : vpc.transform.position;
+      var worldPos = basePos +
+                     Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;
+      player.transform.position = worldPos;
+
+      // Onboard: parents the player to the pieces transform AND registers them onboard so the
+      // parent sticks (a bare SetParent is undone by Character_Patch.UpdateGroundContact).
+      if (vpc.OnboardController != null)
+        vpc.OnboardController.TryAddPlayerIfMissing(player);
+      else
+        player.transform.SetParent(vpc.transform);
+
+      if (player.m_body != null)
+      {
+        player.m_body.velocity = Vector3.zero;
+        player.m_body.angularVelocity = Vector3.zero;
+      }
+
+      // Keep the server/zdo in sync so the player isn't streamed back to the pre-teleport position.
+      playerSpawnController.SyncPlayerPosition(worldPos);
+    }
+
+    UnfreezeSpawnedPlayer(player);
+  }
+
+  private static void UnfreezeSpawnedPlayer(Player? player)
+  {
+    if (player == null) return;
+    if (player.IsDebugFlying()) player.ToggleDebugFly();
+    if (player.m_body != null) player.m_body.isKinematic = false;
   }
 }

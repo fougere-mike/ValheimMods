@@ -184,6 +184,12 @@ public class ValheimRaftPlugin : BaseUnityPlugin
     PlayerSpawnController.IsBedOnDynamicVehicle = bed =>
       bed != null &&
       VehiclePiecesController.GetVehiclePiecesController(bed.gameObject) != null;
+
+    // Death-respawn on a moving boat: after the coarse teleport, place the player on the live bed
+    // and parent + onboard them so the moving boat carries them (the plain path only set the
+    // position once, leaving the player behind in the water). See OnSpawnMoveToVehicleZdo.
+    PlayerSpawnController.OnSpawnMoveToVehicle =
+      DynamicLocationsLoginIntegration.OnSpawnMoveToVehicleZdo;
   }
 
 

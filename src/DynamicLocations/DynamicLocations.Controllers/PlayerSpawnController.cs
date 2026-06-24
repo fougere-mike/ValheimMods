@@ -41,6 +41,17 @@ public class PlayerSpawnController : MonoBehaviour
   /// </summary>
   public static Func<Bed, bool>? IsBedOnDynamicVehicle;
 
+  /// <summary>
+  /// Assigned by the vehicle mod (ValheimVehicles) so the death-respawn path can finish placement on
+  /// a MOVING boat: it parents and onboards the player to the live vehicle (plain MovePlayerToZdo
+  /// sets the position only once, so a moving boat slides out from under the player). A coroutine the
+  /// spawn flow yields on. Fully qualified System.Func to avoid the single-arg Func delegate declared
+  /// lower in this file. When null, DynamicLocations falls back to the plain teleport (graceful
+  /// degradation when the vehicle mod is absent).
+  /// </summary>
+  public static System.Func<ZDO, Vector3?, PlayerSpawnController, IEnumerator>?
+    OnSpawnMoveToVehicle;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;
@@ -359,7 +370,13 @@ public class PlayerSpawnController : MonoBehaviour
     switch (locationVariationType)
     {
       case LocationVariation.Spawn:
-        yield return MovePlayerToZdo(zdoOutput, offset);
+        // Route the death-respawn through the vehicle finalizer (parents + onboards the player on
+        // the live, possibly moving boat) when ValheimVehicles is present; otherwise fall back to
+        // the plain teleport. The finalizer itself calls MovePlayerToZdo for the coarse placement.
+        if (OnSpawnMoveToVehicle != null)
+          yield return OnSpawnMoveToVehicle(zdoOutput, offset, this);
+        else
+          yield return MovePlayerToZdo(zdoOutput, offset);
         break;
       case LocationVariation.Logout:
         yield return LoginAPIController.RunAllIntegrations_OnLoginMoveToZdo(
@@ -526,15 +543,22 @@ public class PlayerSpawnController : MonoBehaviour
     IsTeleportingToDynamicLocation =
       DynamicTeleport(teleportPosition, zdo.GetRotation());
 
-    // probably not necessary, but helps with loading some heavier things.
+    // Stream-chase the boat while waiting for its zone to load. The boat may be moving — and far
+    // away if another player is sailing it — so we re-center the streaming reference on the boat's
+    // LIVE zdo position every frame. A one-shot reference set (the old behaviour) lets a moving
+    // boat drift out of the streamed zone so it never instantiates and we end up dumped at a stale
+    // spot. Bounded by the same timeout so this loop can never hang (it previously had none).
     var zoneId = ZoneSystem.GetZone(zdo.GetPosition());
-    ZoneSystem.instance.PokeLocalZone(zoneId);
-
-    var zoneIsNotLoaded = false;
-    while (zoneIsNotLoaded == false)
+    var zoneLoaded = false;
+    while (!zoneLoaded)
     {
-      zoneId = ZoneSystem.GetZone(zdo.GetPosition());
-      zoneIsNotLoaded = ZoneSystem.instance.IsZoneLoaded(zoneId);
+      var livePos = zdo.GetPosition();
+      if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
+      zoneId = ZoneSystem.GetZone(livePos);
+      ZoneSystem.instance.PokeLocalZone(zoneId);
+      zoneLoaded = ZoneSystem.instance.IsZoneLoaded(zoneId);
+      if (zoneLoaded || HasExpiredTimer(timer,
+            DynamicLocationsConfig.LocationControlsTimeoutInMs.Value)) break;
       yield return new WaitForFixedUpdate();
     }
 
@@ -569,6 +593,11 @@ public class PlayerSpawnController : MonoBehaviour
 
     yield return new WaitUntil(() =>
     {
+      // Keep chasing the (possibly moving) boat while its instance streams in — same reasoning as
+      // the zone-wait loop above. Without this a boat sailed away by another player never appears.
+      var livePos = zdo.GetPosition();
+      if (ZNet.instance != null) ZNet.instance.SetReferencePosition(livePos);
+      ZoneSystem.instance.PokeLocalZone(ZoneSystem.GetZone(livePos));
       zdoNetViewInstance = ZNetScene.instance.FindInstance(zdo);
       return zdoNetViewInstance != null || HasExpiredTimer(timer,
         DynamicLocationsConfig.LocationControlsTimeoutInMs.Value);

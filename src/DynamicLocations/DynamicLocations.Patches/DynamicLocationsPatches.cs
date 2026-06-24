@@ -4,6 +4,7 @@ using DynamicLocations.Constants;
 using DynamicLocations.Controllers;
 using HarmonyLib;
 using UnityEngine;
+using ZdoWatcher;
 using Zolantris.Shared;
 using Logger = Jotunn.Logger;
 
@@ -52,6 +53,41 @@ public class DynamicLocationsPatches
     }
 
     spawnController.SyncBedSpawnPoint(__instance.m_nview.GetZDO(), __instance);
+  }
+
+  /// <summary>
+  /// Vanilla <see cref="Bed.IsCurrent" /> compares the bed's LIVE spawn point to the player's
+  /// STATIC custom spawn coordinate (<c>Vector3.Distance(...) &lt; 1f</c>). On a moving boat the bed
+  /// slides away from that fixed coordinate, so the bed is never recognised as the current spawn —
+  /// it always offers "Set spawn point" instead of "Sleep" (vanilla <c>GetHoverText</c> and
+  /// <c>Interact</c> both branch on <c>IsCurrent</c>). For a vehicle bed the player has registered
+  /// as their dynamic spawn, force <c>IsCurrent = true</c> so the bed behaves as the current spawn
+  /// no matter how far the boat has moved.
+  /// </summary>
+  [HarmonyPatch(typeof(Bed), nameof(Bed.IsCurrent))]
+  [HarmonyPostfix]
+  private static void OnBedIsCurrent(Bed __instance, ref bool __result)
+  {
+    if (__result) return; // vanilla already recognises it as current
+    var player = Player.m_localPlayer;
+    if (player == null) return;
+    if (__instance == null || __instance.m_nview == null) return;
+    var zdo = __instance.m_nview.GetZDO();
+    if (zdo == null) return;
+
+    // Only vehicle beds — land beds keep pure vanilla behaviour.
+    var isOnVehicle =
+      PlayerSpawnController.IsBedOnDynamicVehicle?.Invoke(__instance) ?? false;
+    if (!isOnVehicle) return;
+
+    // Is THIS bed the player's registered dynamic spawn? Match by persistent id — SyncBedSpawnPoint
+    // only registers the player's own bed, so identity is sufficient (the drifting world-distance
+    // check is exactly what we are bypassing).
+    if (!ZdoWatchController.GetPersistentID(zdo, out var bedId)) return;
+    var storedId = LocationController.GetZdoFromStore(LocationVariation.Spawn, player);
+    if (storedId == null || storedId.Value != bedId) return;
+
+    __result = true;
   }
 
   // [HarmonyPatch(typeof(PlayerProfile), "SetLogoutPoint")]
