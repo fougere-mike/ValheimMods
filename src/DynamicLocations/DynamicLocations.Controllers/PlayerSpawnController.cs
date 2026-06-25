@@ -80,6 +80,16 @@ public class PlayerSpawnController : MonoBehaviour
   /// </summary>
   public static System.Func<ZDO, Vector3?>? GetVehicleLiveStreamPosition;
 
+  /// <summary>
+  /// Assigned by the vehicle mod. Given a bed ZDO, returns the live respawn point (already including
+  /// the height offset) resolved through the VEHICLE — the bed instance if present, otherwise the
+  /// matching bed among the vehicle's activated bed pieces, otherwise the vehicle centre. This lets the
+  /// resolver spawn the player WITHOUT depending on the standalone bed ZNetView, which a moving boat
+  /// does not reliably instantiate (FindInstance(bedZdo) stays null even while the vehicle is loaded,
+  /// stalling the old bed-instance-gated path forever). Returns null until the vehicle is loaded.
+  /// </summary>
+  public static System.Func<ZDO, Vector3?>? GetVehicleSpawnPoint;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;

@@ -207,6 +207,12 @@ public class ValheimRaftPlugin : BaseUnityPlugin
     // and force-sends the pieces to that position each frame so the whole boat streams in like a relog.
     PlayerSpawnController.GetVehicleLiveStreamPosition =
       DynamicLocationsLoginIntegration.GetVehicleLiveStreamPositionForBed;
+
+    // Strategy B spawn-point resolver: returns the live respawn point through the VEHICLE (matching bed
+    // among its activated pieces, else the vehicle centre), so a moving boat that never instantiates the
+    // standalone bed ZNetView can still spawn the player instead of stalling on FindInstance(bedZdo).
+    PlayerSpawnController.GetVehicleSpawnPoint =
+      DynamicLocationsLoginIntegration.GetVehicleSpawnPointForBed;
   }
 
 

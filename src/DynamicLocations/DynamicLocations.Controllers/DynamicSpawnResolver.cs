@@ -126,21 +126,29 @@ public static class DynamicSpawnResolver
     ZNet.instance.SetReferencePosition(livePos);
     ZoneSystem.instance.PokeLocalZone(ZoneSystem.GetZone(livePos));
 
-    var instance = ZNetScene.instance.FindInstance(zdo);
-    if (instance == null) return Result.Waiting;                 // bed not instantiated yet
     if (!ZNetScene.instance.IsAreaReady(livePos)) return Result.Waiting;
 
-    // CRITICAL: do not spawn until the boat's PIECES have activated (the deck has colliders). The
-    // ZNetScene_IsAreaReady_Patch deliberately reports the area ready while vehicle pieces are still
-    // streaming, so IsAreaReady alone places the player on the bed before the floor exists and they
-    // fall through into the water — and once they're alive-in-the-water the boat unloads and sails
-    // off. PlayerSpawnController.IsVehicleSpawnReady (assigned by the vehicle mod) returns true only
-    // once the bed's vehicle is fully activated.
-    if (PlayerSpawnController.IsVehicleSpawnReady != null &&
-        !PlayerSpawnController.IsVehicleSpawnReady(zdo))
-      return Result.Waiting;
+    // Vehicle path (ValheimVehicles present): spawn through the VEHICLE, not the standalone bed
+    // instance. A MOVING boat does not reliably instantiate the bed's own ZNetView — FindInstance(
+    // bedZdo) stays null even though the vehicle is loaded — so the old bed-instance-gated path stalled
+    // here forever and timed out. IsVehicleSpawnReady reports once the vehicle is loaded; the player is
+    // then held FROZEN + ONBOARDED by the post-spawn finalizer until a real deck exists, so it is safe
+    // to spawn before the floor is ready.
+    if (PlayerSpawnController.GetVehicleSpawnPoint != null)
+    {
+      if (PlayerSpawnController.IsVehicleSpawnReady != null &&
+          !PlayerSpawnController.IsVehicleSpawnReady(zdo))
+        return Result.Waiting;
+      var vehiclePoint = PlayerSpawnController.GetVehicleSpawnPoint(zdo);
+      if (!vehiclePoint.HasValue) return Result.Waiting;
+      point = vehiclePoint.Value;
+      LastRespawnHandledByStrategyB = true;
+      return Result.Ready;
+    }
 
-    // Live bed transform — follows the boat.
+    // Legacy path (DynamicLocations standalone, no vehicle mod): require the bed instance.
+    var instance = ZNetScene.instance.FindInstance(zdo);
+    if (instance == null) return Result.Waiting;
     var bed = instance.GetComponent<Bed>();
     var basePos = bed != null ? bed.GetSpawnPoint() : instance.transform.position;
     point = basePos + Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;
