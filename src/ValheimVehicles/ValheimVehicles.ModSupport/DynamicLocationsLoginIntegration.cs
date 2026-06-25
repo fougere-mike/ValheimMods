@@ -16,6 +16,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using ValheimVehicles.BepInExConfig;
 using ValheimVehicles.Controllers;
+using ValheimVehicles.Enums;
 using ValheimVehicles.RPC;
 using ValheimVehicles.Shared.Constants;
 using ZdoWatcher;
@@ -204,6 +205,38 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
   /// the streaming reference from the onboarded local player, so once onboard the boat keeps loading
   /// around the player even as it sails — the same condition that makes a relog load the whole boat.
   /// </summary>
+  /// <summary>
+  /// THE moving-boat activation unlock. A vehicle's pieces only activate while
+  /// <see cref="VehiclePiecesController.BaseVehicleInitState" /> == Complete — otherwise
+  /// ActivatePendingPiecesCoroutine yield-breaks on the first line and NONE of the registered piece
+  /// ZDOs ever instantiate into a deck (observed on a moving boat: registered=574, activated=0).
+  ///
+  /// That state is set exactly once, during init (InitializeBaseVehicleValuesWhenReady → LoadInitState).
+  /// For a far/moving boat that streams in DURING respawn, LoadInitState runs before the owner-synced
+  /// init bool has arrived, so it lands on Created and is never re-evaluated — the deck never forms.
+  /// A relog fixes it only because the reconnecting client re-reads that bool (now true) and flips to
+  /// Complete. We reproduce that here every frame until it sticks:
+  ///   1. LoadInitState() — clean re-read of the synced bool (no ZDO write).
+  ///   2. if still not Complete, SetInitComplete() — force the same local transition the OWNER does.
+  ///      SetInitComplete writes the init bool + flips the C# state; ZDO.Set does NOT claim ownership,
+  ///      so the driver keeps control of the boat. The bool is already true on the owner, so the
+  ///      local write is a no-op against the next sync.
+  /// Once Complete, nothing downgrades it (LoadInitState is not re-driven by the engine), so this
+  /// runs at most a couple of frames before activation takes over.
+  /// </summary>
+  private static void DriveVehicleActivation(VehiclePiecesController vpc)
+  {
+    if (vpc == null) return;
+    if (vpc.BaseVehicleInitState != InitializationState.Complete)
+    {
+      vpc.LoadInitState();
+      if (vpc.BaseVehicleInitState != InitializationState.Complete)
+        vpc.SetInitComplete();
+    }
+
+    vpc.StartActivatePendingPieces();
+  }
+
   private static IEnumerator HoldAndLoadThenOnboard(ZDO bedZdo,
     PlayerSpawnController playerSpawnController)
   {
@@ -219,7 +252,7 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     var vehicleId = VehiclePiecesController.GetParentID(bedZdo);
     VehiclePiecesController? vpc = null;
     var solidFrames = 0;
-    var logged = false;
+    long lastLogMs = -10000;
 
     while (timer.ElapsedMilliseconds < maxWaitMs)
     {
@@ -240,8 +273,9 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
         else
           player.transform.SetParent(vpc.transform);
 
-        // Re-run activation for any pieces that have instantiated but not yet activated.
-        vpc.StartActivatePendingPieces();
+        // Force the vehicle to Complete (mimic the relog read of the init bool) so its pieces can
+        // actually activate, then drain newly-instantiated pieces. Without this the deck never forms.
+        DriveVehicleActivation(vpc);
 
         // Hold the player on the live bed (or the vehicle centre until the bed activates) each frame.
         var bed = FindBedForVehicle(bedZdo, vpc);
@@ -264,11 +298,16 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
         }
       }
 
-      if (!logged && timer.ElapsedMilliseconds > 3000)
+      if (timer.ElapsedMilliseconds - lastLogMs >= 2000)
       {
-        logged = true;
+        lastLogMs = timer.ElapsedMilliseconds;
+        var aPending =
+          VehiclePiecesController.m_pendingPieces.TryGetValue(vehicleId,
+            out var apl) && apl != null
+            ? apl.Count
+            : 0;
         Logger.LogInfo(
-          $"[Respawn] still streaming boat for bed {bedZdo?.m_uid}; vpc={vpc != null} pieces={CountRegisteredPieces(vpc)} solidFrames={solidFrames}");
+          $"[Respawn] streaming bed {bedZdo?.m_uid}; vpc={vpc != null} initState={(vpc != null ? vpc.BaseVehicleInitState.ToString() : "-")} registered={CountRegisteredPieces(vpc)} activated={(vpc != null ? vpc.m_pieces.Count : 0)} pending={aPending} beds={(vpc != null ? vpc.GetBedPieces()?.Count ?? 0 : 0)} solidFrames={solidFrames} t={timer.ElapsedMilliseconds}ms");
       }
 
       yield return new WaitForFixedUpdate();
@@ -392,7 +431,7 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
       if (bedNv != null)
       {
         var vpc = VehiclePiecesController.GetVehiclePiecesController(bedNv.gameObject);
-        if (vpc != null) vpc.StartActivatePendingPieces();
+        if (vpc != null) DriveVehicleActivation(vpc);
       }
     }
 
