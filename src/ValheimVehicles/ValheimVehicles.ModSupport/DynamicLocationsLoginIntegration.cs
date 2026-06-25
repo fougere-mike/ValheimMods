@@ -344,29 +344,115 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     }
     var tick = _streamTick++;
 
-    // Pull the vehicle's own ZDO (~every 0.5s) so we keep getting its live position even after the boat
-    // sailed out of range and unloaded.
+    // ~every 0.5s ask the server to force-send the pieces AND push back the authoritative live vehicle
+    // position; also pull the vehicle's own ZDO. (RequestZdoFromServer alone proved unreliable for
+    // refreshing a far/unowned ZDO's position — the bed/vehicle ZDO stayed frozen at the spot the boat
+    // last unloaded — so we depend on the explicit server position push, not the ZDO refresh.)
     if (tick % 25 == 0)
-      ZdoWatchController.Instance.RequestZdoFromServer(vehicleId);
-
-    // Bulk force-send every piece to the boat's CURRENT position (~every 1s), like a fresh join.
-    if (tick % 50 == 0)
+    {
       VehiclePieceSyncRPC.Request(vehicleId);
+      ZdoWatchController.Instance.RequestZdoFromServer(vehicleId);
+    }
 
     // Re-run activation for pieces that have instantiated but not yet activated.
     if (ZNetScene.instance != null)
     {
-      var nv = ZNetScene.instance.FindInstance(bedZdo);
-      if (nv != null)
+      var bedNv = ZNetScene.instance.FindInstance(bedZdo);
+      if (bedNv != null)
       {
-        var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+        var vpc = VehiclePiecesController.GetVehiclePiecesController(bedNv.gameObject);
         if (vpc != null) vpc.StartActivatePendingPieces();
       }
     }
 
-    var vehicleZdo = ZdoWatchController.Instance.GetZdo(vehicleId);
-    if (vehicleZdo == null) return null;
-    return vehicleZdo.GetPosition();
+    // Resolve the boat's LIVE position from the most reliable source available:
+    //  1. a loaded VPC instance (exact),
+    //  2. the server-pushed authoritative position (robust to stale client ZDOs; needs server 4.3.4+),
+    //  3. the centroid of the most-populated zone among the piece ZDOs (client-only; robust to a few
+    //     stale outliers like a bed whose position didn't refresh),
+    //  4. the vehicle's own ZDO position (may be stale).
+    Vector3? chosen = null;
+    var source = "none";
+    if (VehiclePiecesController.ActiveInstances.TryGetValue(vehicleId,
+          out var inst) && inst != null)
+    {
+      chosen = inst.transform.position;
+      source = "instance";
+    }
+    else if (VehiclePieceSyncRPC.TryGetServerVehiclePosition(vehicleId,
+               out var serverPos))
+    {
+      chosen = serverPos;
+      source = "server-push";
+    }
+    else if (TryGetPieceCloudPosition(vehicleId, out var cloud, out _))
+    {
+      chosen = cloud;
+      source = "piece-cloud";
+    }
+    else
+    {
+      var vehicleZdo = ZdoWatchController.Instance.GetZdo(vehicleId);
+      if (vehicleZdo != null)
+      {
+        chosen = vehicleZdo.GetPosition();
+        source = "vehicle-zdo";
+      }
+    }
+
+    if (tick % 25 == 0)
+    {
+      var hasServer =
+        VehiclePieceSyncRPC.TryGetServerVehiclePosition(vehicleId, out var sp);
+      var vz = ZdoWatchController.Instance.GetZdo(vehicleId);
+      TryGetPieceCloudPosition(vehicleId, out var pc, out var pcCount);
+      Logger.LogInfo(
+        $"[Respawn] streamPos vehicle={vehicleId} -> {source}:{(chosen.HasValue ? chosen.Value.ToString() : "null")} | bed={bedZdo.GetPosition()} serverPush={(hasServer ? sp.ToString() : "-")} vehicleZdo={(vz != null ? vz.GetPosition().ToString() : "-")} pieceCloud={pc}(n={pcCount}) instanceLoaded={VehiclePiecesController.ActiveInstances.ContainsKey(vehicleId)}");
+    }
+
+    return chosen;
+  }
+
+  /// <summary>
+  /// Client-only estimate of where the boat is, from the piece ZDOs the client already holds. Buckets
+  /// the piece positions by zone and returns the centroid of the most-populated zone, so a handful of
+  /// stale outliers (e.g. a bed ZDO whose position never refreshed) don't drag the result off the boat.
+  /// </summary>
+  private static bool TryGetPieceCloudPosition(int vehicleId, out Vector3 pos,
+    out int pieceCount)
+  {
+    pos = Vector3.zero;
+    pieceCount = 0;
+    if (ZoneSystem.instance == null) return false;
+    if (!VehiclePiecesController.m_allPieces.TryGetValue(vehicleId,
+          out var list) || list == null || list.Count == 0) return false;
+
+    var zoneCounts = new Dictionary<Vector2i, int>();
+    var zoneSums = new Dictionary<Vector2i, Vector3>();
+    foreach (var zdo in list)
+    {
+      if (zdo == null || !zdo.IsValid()) continue;
+      var p = zdo.GetPosition();
+      var z = ZoneSystem.GetZone(p);
+      zoneCounts.TryGetValue(z, out var c);
+      zoneCounts[z] = c + 1;
+      zoneSums.TryGetValue(z, out var s);
+      zoneSums[z] = s + p;
+      pieceCount++;
+    }
+    if (pieceCount == 0) return false;
+
+    var bestCount = -1;
+    var bestZone = default(Vector2i);
+    foreach (var kv in zoneCounts)
+      if (kv.Value > bestCount)
+      {
+        bestCount = kv.Value;
+        bestZone = kv.Key;
+      }
+
+    pos = zoneSums[bestZone] / bestCount;
+    return true;
   }
 
   private static int CountRegisteredPieces(VehiclePiecesController? vpc)

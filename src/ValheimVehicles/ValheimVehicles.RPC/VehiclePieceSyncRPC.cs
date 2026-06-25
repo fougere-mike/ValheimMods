@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
 using ValheimVehicles.Controllers;
 using ValheimVehicles.SharedScripts;
 using ZdoWatcher;
@@ -12,35 +14,55 @@ namespace ValheimVehicles.RPC;
 /// rate-limited, churn-prone sector sync (which only trickles ~10-15% of a moving boat's pieces to a
 /// respawning client, so the rest of the boat is open space they fall through).
 ///
-/// The server first snaps every piece ZDO to the vehicle's CURRENT world position so they land in the
-/// sector the client is loading around the boat (otherwise pieces with stale positions stay in
-/// unloaded sectors and never instantiate even after a force-send), then force-sends them. Used by the
-/// Strategy B respawn path. No-op on the host/server (it already has every piece locally).
+/// The server also REPLIES with the vehicle's authoritative LIVE world position. This is the key bit
+/// for a moving boat: the respawning client's own copy of the boat/bed ZDO is stale (frozen wherever
+/// the boat last unloaded), so it cannot tell where the boat actually is now. Valheim's normal ZDO
+/// position sync does not reliably refresh a far/unowned ZDO on demand, so we push the position
+/// explicitly from the authoritative server instead of hoping the ZDO refreshes. The client centres
+/// its respawn streaming reference on that pushed position.
+///
+/// No-op on the host/server (it already has every piece + the live position locally). REQUIRES the
+/// server to run a build with this RPC (4.3.2+ for the force-send, 4.3.4+ for the position push) —
+/// ValheimRAFT's NetworkCompatibility is only Minor-strict, so a stale server silently no-ops this.
 /// </summary>
 public static class VehiclePieceSyncRPC
 {
   public static RPCEntity? RequestPieces_RPCInstance;
+  public static RPCEntity? VehiclePosResponse_RPCInstance;
+
+  /// <summary>Server-pushed live vehicle positions, keyed by vehicle persistent id (client-side).</summary>
+  private static readonly Dictionary<int, Vector3> ServerVehiclePositions = new();
 
   public static void RegisterAll()
   {
     RequestPieces_RPCInstance =
       RPCManager.RegisterRPC(nameof(RPC_RequestVehiclePieces),
         RPC_RequestVehiclePieces);
+    VehiclePosResponse_RPCInstance =
+      RPCManager.RegisterRPC(nameof(RPC_VehiclePosResponse),
+        RPC_VehiclePosResponse);
   }
 
-  /// <summary>Client -> server: force-send me every piece of this vehicle.</summary>
+  /// <summary>Client -> server: force-send me every piece of this vehicle + reply with its live pos.</summary>
   public static void Request(int vehiclePersistentId)
   {
     if (vehiclePersistentId == 0) return;
     if (RequestPieces_RPCInstance == null) return;
     if (ZRoutedRpc.instance == null || ZNet.instance == null) return;
-    // The host/server already has every piece ZDO locally — nothing to request.
+    // The host/server already has every piece ZDO + the live position locally — nothing to request.
     if (ZNet.instance.IsServer()) return;
 
     var pkg = new ZPackage();
     pkg.Write(vehiclePersistentId);
     RequestPieces_RPCInstance.Send(ZRoutedRpc.instance.GetServerPeerID(), pkg,
       false);
+  }
+
+  /// <summary>The last server-pushed live position for this vehicle, if we have received one.</summary>
+  public static bool TryGetServerVehiclePosition(int vehiclePersistentId,
+    out Vector3 pos)
+  {
+    return ServerVehiclePositions.TryGetValue(vehiclePersistentId, out pos);
   }
 
   private static IEnumerator RPC_RequestVehiclePieces(long sender, ZPackage pkg)
@@ -57,6 +79,16 @@ public static class VehiclePieceSyncRPC
     var vehicleZdo = ZdoWatchController.Instance != null
       ? ZdoWatchController.Instance.GetZdo(vehicleId)
       : null;
+
+    // Reply with the authoritative live vehicle position so the client can centre its respawn
+    // streaming reference on where the boat actually is now (its own ZDO copy is stale).
+    if (vehicleZdo != null && VehiclePosResponse_RPCInstance != null)
+    {
+      var resp = new ZPackage();
+      resp.Write(vehicleId);
+      resp.Write(vehicleZdo.GetPosition());
+      VehiclePosResponse_RPCInstance.Send(sender, resp, false);
+    }
 
     if (!VehiclePiecesController.m_allPieces.TryGetValue(vehicleId,
           out var pieces) || pieces == null)
@@ -82,6 +114,17 @@ public static class VehiclePieceSyncRPC
     }
 
     LoggerProvider.LogDebug(
-      $"[VehiclePieceSyncRPC] Force-sent vehicle {vehicleId} + {sent} pieces to peer {sender}.");
+      $"[VehiclePieceSyncRPC] Force-sent vehicle {vehicleId} (pos {(vehicleZdo != null ? vehicleZdo.GetPosition().ToString() : "?")}) + {sent} pieces to peer {sender}.");
+  }
+
+  /// <summary>Server -> client: the authoritative live position of a vehicle we asked about.</summary>
+  private static IEnumerator RPC_VehiclePosResponse(long sender, ZPackage pkg)
+  {
+    pkg.SetPos(0);
+    var vehicleId = pkg.ReadInt();
+    if (vehicleId == 0) yield break;
+    var pos = pkg.ReadVector3();
+    ServerVehiclePositions[vehicleId] = pos;
+    yield break;
   }
 }
