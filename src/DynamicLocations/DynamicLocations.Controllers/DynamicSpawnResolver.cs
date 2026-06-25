@@ -109,7 +109,20 @@ public static class DynamicSpawnResolver
     ResolvedBedZdo = zdo;
 
     // Stream the boat's LIVE zone in (re-centred every frame so it follows a moving boat).
+    //
+    // CRITICAL: centre the reference on the parent VEHICLE's live position, NOT the bed ZDO's own
+    // position. A bed's ZDO position is only kept current once the boat's pieces have activated
+    // (client-side UpdateBedPieces), which itself needs the boat streamed in — a deadlock for a moving
+    // boat: the bed position is frozen wherever the boat last unloaded, so pinning the reference there
+    // loads empty water while the real boat sails on and only the ~15% near the stale spot ever loads.
+    // GetVehicleLiveStreamPosition (vehicle mod) returns the boat's main ZDO position — updated every
+    // frame by the driver — and force-sends the pieces so they arrive at that live position.
     var livePos = zdo.GetPosition();
+    if (PlayerSpawnController.GetVehicleLiveStreamPosition != null)
+    {
+      var boatPos = PlayerSpawnController.GetVehicleLiveStreamPosition(zdo);
+      if (boatPos.HasValue) livePos = boatPos.Value;
+    }
     ZNet.instance.SetReferencePosition(livePos);
     ZoneSystem.instance.PokeLocalZone(ZoneSystem.GetZone(livePos));
 

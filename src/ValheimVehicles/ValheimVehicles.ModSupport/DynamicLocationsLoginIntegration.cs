@@ -18,6 +18,7 @@ using ValheimVehicles.BepInExConfig;
 using ValheimVehicles.Controllers;
 using ValheimVehicles.RPC;
 using ValheimVehicles.Shared.Constants;
+using ZdoWatcher;
 using Zolantris.Shared.Debug;
 using Logger = Jotunn.Logger;
 
@@ -156,82 +157,20 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
 
   /// <summary>
   /// Death-respawn finalizer for a BED zdo on a vehicle (assigned to
-  /// <see cref="PlayerSpawnController.OnSpawnMoveToVehicle" /> in ValheimRaftPlugin). The plain
-  /// spawn path only set the player position once, so on a moving boat the player was left behind
-  /// in the water. This mirrors the login finalizer (<see cref="OnLoginMoveToZDO" />) but keyed on
-  /// the bed: coarse-place + stream-chase via MovePlayerToZdo, wait for the bed's vehicle pieces to
-  /// activate, then place the player on the LIVE bed spawn point and ONBOARD them so the moving boat
-  /// carries them (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard, so
-  /// a bare SetParent is undone next frame). The player is held kinematic across the wait so they
-  /// cannot fall into the water, and is ALWAYS unfrozen on exit (never trapped on the death screen).
+  /// <see cref="PlayerSpawnController.OnSpawnMoveToVehicle" /> in ValheimRaftPlugin), used as the
+  /// Strategy B fallback when the boat could not be streamed in before the spawn. Coarse-places the
+  /// player via MovePlayerToZdo, then hands off to <see cref="HoldAndLoadThenOnboard" /> to fully
+  /// stream the boat in and onboard the player before releasing control.
   /// </summary>
   public static IEnumerator OnSpawnMoveToVehicleZdo(ZDO zdo, Vector3? offset,
     PlayerSpawnController playerSpawnController)
   {
-    var localTimer = Stopwatch.StartNew();
-
-    // Coarse placement + freeze. MovePlayerToZdo now stream-chases a moving/far boat until its
-    // instance loads, and leaves the player on the bed at a coarse position.
+    // Coarse placement + freeze. MovePlayerToZdo stream-chases a moving/far boat until its instance
+    // loads, leaving the player roughly on the bed.
     yield return playerSpawnController.MovePlayerToZdo(zdo, offset, true, true);
 
-    var player = Player.m_localPlayer;
-    // Hold the player still while the vehicle pieces activate so a moving boat / the water cannot
-    // drag them off before we do the final placement + onboard below.
-    if (player != null && player.m_body != null) player.m_body.isKinematic = true;
-
-    // Resolve the bed instance's vehicle pieces controller (retry while it streams in).
-    VehiclePiecesController? vpc = null;
-    while (vpc == null && localTimer.ElapsedMilliseconds < 5000)
-    {
-      var nv = ZNetScene.instance.FindInstance(zdo);
-      if (nv != null)
-        vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
-      if (vpc == null) yield return new WaitForFixedUpdate();
-    }
-
-    if (vpc == null)
-    {
-      // Boat never streamed in (sank / destroyed / unreachable). Unfreeze and leave the player at
-      // the coarse position — never trapped frozen on the death screen.
-      UnfreezeSpawnedPlayer(player);
-      yield break;
-    }
-
-    // Wait for the pieces to finish activating so the bed (and its live m_spawnPoint) is in place.
-    yield return new WaitUntil(() =>
-      vpc == null ||
-      vpc.isInitialPieceActivationComplete || vpc.IsActivationComplete ||
-      localTimer.ElapsedMilliseconds > 8000);
-
-    if (vpc != null && player != null)
-    {
-      var bedNetView = ZNetScene.instance.FindInstance(zdo);
-      var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
-      // Use the LIVE bed spawn point (it follows the moving boat). The stored Spawn offset is a
-      // meaningless world-delta from SyncBedSpawnPoint, so it is intentionally not used here.
-      var basePos = bed != null ? bed.GetSpawnPoint() : vpc.transform.position;
-      var worldPos = basePos +
-                     Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;
-      player.transform.position = worldPos;
-
-      // Onboard: parents the player to the pieces transform AND registers them onboard so the
-      // parent sticks (a bare SetParent is undone by Character_Patch.UpdateGroundContact).
-      if (vpc.OnboardController != null)
-        vpc.OnboardController.TryAddPlayerIfMissing(player);
-      else
-        player.transform.SetParent(vpc.transform);
-
-      if (player.m_body != null)
-      {
-        player.m_body.velocity = Vector3.zero;
-        player.m_body.angularVelocity = Vector3.zero;
-      }
-
-      // Keep the server/zdo in sync so the player isn't streamed back to the pre-teleport position.
-      playerSpawnController.SyncPlayerPosition(worldPos);
-    }
-
-    UnfreezeSpawnedPlayer(player);
+    // Then hold the player frozen + onboarded and fully stream the boat in before releasing them.
+    yield return HoldAndLoadThenOnboard(zdo, playerSpawnController);
   }
 
   private static void UnfreezeSpawnedPlayer(Player? player)
@@ -242,82 +181,212 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
   }
 
   /// <summary>
-  /// Strategy B onboard step (assigned to <see cref="PlayerSpawnController.OnSpawnOnboardToVehicle" />
-  /// in ValheimRaftPlugin). Vanilla FindSpawnPoint already spawned the player ON the live bed, so
-  /// there is NO teleport here: resolve the bed's vehicle, refine the placement once pieces have
-  /// activated, and onboard the player so the moving boat carries them
-  /// (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard).
+  /// Strategy B onboard step (assigned to <see cref="PlayerSpawnController.OnSpawnOnboardToVehicle" />).
+  /// Vanilla FindSpawnPoint already spawned the player ON the live bed; hold them there and fully
+  /// stream the boat in before releasing control.
   /// </summary>
   public static IEnumerator OnSpawnOnboardToVehicleZdo(ZDO bedZdo,
+    PlayerSpawnController playerSpawnController)
+  {
+    yield return HoldAndLoadThenOnboard(bedZdo, playerSpawnController);
+  }
+
+  /// <summary>
+  /// Shared respawn finalizer: hold the player FROZEN on the live bed and ONBOARDED to the boat while
+  /// actively driving it to fully stream + activate (force-send pieces, re-centre the streaming
+  /// reference on the boat's live position, re-run piece activation) — exactly like standing on a boat
+  /// right after a relog. The freeze is released only once a REAL deck collider exists under the bed
+  /// for a few consecutive frames (<see cref="HasSolidFloorUnderBed" />), never the lying
+  /// <c>vpc.IsActivationComplete</c> (which "completes" with whatever ~15% had streamed in). On
+  /// timeout it releases anyway, so the player is never trapped frozen on the death screen.
+  ///
+  /// Onboarding immediately is load-bearing: <see cref="VehiclePiecesController.NonOwnerSync" /> drives
+  /// the streaming reference from the onboarded local player, so once onboard the boat keeps loading
+  /// around the player even as it sails — the same condition that makes a relog load the whole boat.
+  /// </summary>
+  private static IEnumerator HoldAndLoadThenOnboard(ZDO bedZdo,
     PlayerSpawnController playerSpawnController)
   {
     var player = Player.m_localPlayer;
     if (player == null) yield break;
 
-    // Freeze immediately: the player was spawned at the bed's world position, but the boat may be
-    // moving, so an un-parented player would slide off the deck (or drop a frame) before we parent
-    // them. Held kinematic until parented + re-placed below; released on every exit.
+    // Freeze immediately so a moving boat / partially-loaded deck cannot drag the player off or drop
+    // them into the water before the boat finishes loading. Released on every exit path below.
     if (player.m_body != null) player.m_body.isKinematic = true;
 
-    var localTimer = Stopwatch.StartNew();
-
-    // The boat was streamed AND its pieces activated before the spawn (the resolver gated on
-    // IsVehicleSpawnReady), so the pieces controller should already exist; allow a brief retry.
+    var timer = Stopwatch.StartNew();
+    const long maxWaitMs = 25000; // relog-like full-load budget for big / far boats
     VehiclePiecesController? vpc = null;
-    while (vpc == null && localTimer.ElapsedMilliseconds < 5000)
+    Bed? bed = null;
+    var solidFrames = 0;
+    var logged = false;
+
+    while (timer.ElapsedMilliseconds < maxWaitMs)
     {
-      var nv = ZNetScene.instance.FindInstance(bedZdo);
+      var nv = ZNetScene.instance != null
+        ? ZNetScene.instance.FindInstance(bedZdo)
+        : null;
       if (nv != null)
-        vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
-      if (vpc == null) yield return new WaitForFixedUpdate();
-    }
-
-    if (vpc != null)
-    {
-      yield return new WaitUntil(() =>
-        vpc == null || vpc.IsActivationComplete ||
-        localTimer.ElapsedMilliseconds > 8000);
-
-      if (vpc != null && player != null)
       {
-        // Refine onto the LIVE bed (it may have shifted while activating) and onboard so the parent
-        // sticks (Character_Patch.UpdateGroundContact un-parents anyone not registered onboard).
-        var bedNetView = ZNetScene.instance.FindInstance(bedZdo);
-        var bed = bedNetView != null ? bedNetView.GetComponent<Bed>() : null;
-        if (bed != null)
-          player.transform.position = bed.GetSpawnPoint() +
-                                      Vector3.up *
-                                      DynamicLocationsConfig.RespawnHeightOffset.Value;
+        if (bed == null) bed = nv.GetComponent<Bed>();
+        vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+      }
 
+      // Keep driving the boat to stream + activate (idempotent; throttled internally).
+      GetVehicleLiveStreamPositionForBed(bedZdo);
+
+      if (vpc != null)
+      {
+        // Onboard so the engine carries the player AND keeps the boat loaded (NonOwnerSync centres the
+        // streaming reference on the onboarded player). A bare SetParent is undone next frame by
+        // Character_Patch.UpdateGroundContact, so register onboard.
         if (vpc.OnboardController != null)
           vpc.OnboardController.TryAddPlayerIfMissing(player);
         else
           player.transform.SetParent(vpc.transform);
 
-        playerSpawnController.SyncPlayerPosition(player.transform.position);
+        // Re-run activation for any pieces that have instantiated but not yet activated.
+        vpc.StartActivatePendingPieces();
+
+        // Hold the player exactly on the live bed each frame while we wait.
+        var holdPos = (bed != null ? bed.GetSpawnPoint() : vpc.transform.position) +
+                      Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;
+        player.transform.position = holdPos;
+        if (player.m_body != null)
+        {
+          player.m_body.velocity = Vector3.zero;
+          player.m_body.angularVelocity = Vector3.zero;
+        }
+
+        if (nv != null && HasSolidFloorUnderBed(nv, vpc))
+        {
+          if (++solidFrames >= 10) break; // deck under the bed is solid + stable — safe to release
+        }
+        else
+        {
+          solidFrames = 0;
+        }
       }
+
+      if (!logged && timer.ElapsedMilliseconds > 3000)
+      {
+        logged = true;
+        Logger.LogInfo(
+          $"[Respawn] still streaming boat for bed {bedZdo?.m_uid}; vpc={vpc != null} pieces={CountRegisteredPieces(vpc)} solidFrames={solidFrames}");
+      }
+
+      yield return new WaitForFixedUpdate();
     }
 
-    // Always release the freeze (every exit path leads here).
-    if (player != null && player.m_body != null)
+    // Final placement on the live bed + onboard, then release the freeze.
+    if (vpc != null)
     {
-      player.m_body.isKinematic = false;
+      var nv = ZNetScene.instance != null
+        ? ZNetScene.instance.FindInstance(bedZdo)
+        : null;
+      if (bed == null && nv != null) bed = nv.GetComponent<Bed>();
+      var worldPos = (bed != null ? bed.GetSpawnPoint() : vpc.transform.position) +
+                     Vector3.up * DynamicLocationsConfig.RespawnHeightOffset.Value;
+      player.transform.position = worldPos;
+
+      if (vpc.OnboardController != null)
+        vpc.OnboardController.TryAddPlayerIfMissing(player);
+      else
+        player.transform.SetParent(vpc.transform);
+
+      playerSpawnController.SyncPlayerPosition(worldPos);
+
+      Logger.LogInfo(
+        $"[Respawn] released player onto boat (pieces={CountRegisteredPieces(vpc)}, solidFloor={(nv != null && HasSolidFloorUnderBed(nv, vpc))}, waited {timer.ElapsedMilliseconds}ms).");
+    }
+    else
+    {
+      Logger.LogWarning(
+        $"[Respawn] boat for bed {bedZdo?.m_uid} never streamed in within {timer.ElapsedMilliseconds}ms; releasing player at coarse position.");
+    }
+
+    UnfreezeSpawnedPlayer(player);
+    if (player.m_body != null)
+    {
       player.m_body.velocity = Vector3.zero;
       player.m_body.angularVelocity = Vector3.zero;
     }
   }
 
+  // Per-vehicle throttle state for the stream driver.
+  private static int _streamVehicleId;
+  private static int _streamTick;
+
+  /// <summary>
+  /// Drives the bed's parent VEHICLE to stream in and returns its LIVE world position (assigned to
+  /// <see cref="PlayerSpawnController.GetVehicleLiveStreamPosition" />). Each call (throttled
+  /// internally): re-requests the vehicle's own ZDO from the server (its position is updated every
+  /// frame by the driver — the freshest "where is the boat now"), bulk force-sends every piece to that
+  /// live position like a relog, and re-runs piece activation. Returns null until the vehicle ZDO is
+  /// known, so the resolver falls back to the bed ZDO position.
+  ///
+  /// This is the fix for the moving-boat deadlock: the bed ZDO's own position is stale until the boat's
+  /// pieces activate (UpdateBedPieces only runs once active), so centring the streaming reference there
+  /// loads empty water while the real boat sails away. Centring on the vehicle ZDO follows the boat.
+  /// </summary>
+  public static Vector3? GetVehicleLiveStreamPositionForBed(ZDO bedZdo)
+  {
+    if (bedZdo == null || ZNet.instance == null ||
+        ZdoWatchController.Instance == null) return null;
+
+    var vehicleId = VehiclePiecesController.GetParentID(bedZdo);
+    if (vehicleId == 0) return null;
+
+    if (vehicleId != _streamVehicleId)
+    {
+      _streamVehicleId = vehicleId;
+      _streamTick = 0;
+    }
+    var tick = _streamTick++;
+
+    // Pull the vehicle's own ZDO (~every 0.5s) so we keep getting its live position even after the boat
+    // sailed out of range and unloaded.
+    if (tick % 25 == 0)
+      ZdoWatchController.Instance.RequestZdoFromServer(vehicleId);
+
+    // Bulk force-send every piece to the boat's CURRENT position (~every 1s), like a fresh join.
+    if (tick % 50 == 0)
+      VehiclePieceSyncRPC.Request(vehicleId);
+
+    // Re-run activation for pieces that have instantiated but not yet activated.
+    if (ZNetScene.instance != null)
+    {
+      var nv = ZNetScene.instance.FindInstance(bedZdo);
+      if (nv != null)
+      {
+        var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
+        if (vpc != null) vpc.StartActivatePendingPieces();
+      }
+    }
+
+    var vehicleZdo = ZdoWatchController.Instance.GetZdo(vehicleId);
+    if (vehicleZdo == null) return null;
+    return vehicleZdo.GetPosition();
+  }
+
+  private static int CountRegisteredPieces(VehiclePiecesController? vpc)
+  {
+    if (vpc == null) return 0;
+    return VehiclePiecesController.m_allPieces.TryGetValue(vpc.PersistentZdoId,
+      out var list) && list != null
+      ? list.Count
+      : 0;
+  }
+
   /// <summary>
   /// Strategy B spawn-readiness gate (assigned to <see cref="PlayerSpawnController.IsVehicleSpawnReady" />).
-  /// True only once the bed's vehicle pieces are fully activated, so the player spawns onto a solid
-  /// deck instead of falling through into the water while the boat is still streaming in.
+  /// Ready only once a REAL (instantiated + activated) deck collider sits under the bed spawn point, so
+  /// vanilla FindSpawnPoint places the player on a solid deck. m_allPieces.Count is NOT a readiness
+  /// signal (it is only the ZDO registry, filled by the force-send regardless of whether pieces have
+  /// instantiated), and vpc.IsActivationComplete lies (it "completes" at ~15%). The boat is streamed by
+  /// <see cref="GetVehicleLiveStreamPositionForBed" /> (driven each frame from the resolver); this only
+  /// reports readiness.
   /// </summary>
-  // Strategy B readiness tracking for the bed's vehicle.
-  private static int _vsrVehicleId;
-  private static int _vsrLastPieceCount;
-  private static int _vsrStableTicks;
-  private static int _vsrRequestTick;
-
   public static bool IsVehicleSpawnReadyForBed(ZDO bedZdo)
   {
     if (ZNetScene.instance == null) return false;
@@ -325,40 +394,6 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     if (!nv) return false;
     var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
     if (vpc == null) return false;
-
-    var vehicleId = vpc.PersistentZdoId;
-    if (vehicleId == 0) return false;
-
-    if (vehicleId != _vsrVehicleId)
-    {
-      _vsrVehicleId = vehicleId;
-      _vsrLastPieceCount = -1;
-      _vsrStableTicks = 0;
-      _vsrRequestTick = 0;
-    }
-
-    // Ask the server to bulk force-send EVERY piece of this vehicle (like a relog). The normal sector
-    // sync only trickles ~10-15% of a moving boat's pieces to a respawning client. Throttled (~1s).
-    if (_vsrRequestTick++ % 50 == 0)
-      VehiclePieceSyncRPC.Request(vehicleId);
-
-    // Wait until the known piece count stops growing — i.e. all force-sent pieces have arrived — so we
-    // don't spawn onto a partially-loaded boat. vpc.IsActivationComplete is unreliable here: the
-    // one-shot activation "completes" with whatever ~15% had streamed in and never re-runs.
-    var known =
-      VehiclePiecesController.m_allPieces.TryGetValue(vehicleId, out var list) &&
-      list != null
-        ? list.Count
-        : 0;
-    if (known > 0 && known == _vsrLastPieceCount) _vsrStableTicks++;
-    else _vsrStableTicks = 0;
-    _vsrLastPieceCount = known;
-
-    if (known == 0) return false;
-    if (_vsrStableTicks < 75) return false; // ~1.5s with no new pieces
-
-    // Finally require a SOLID surface beneath the bed spawn point, so the player lands on the boat
-    // instead of falling through into the water.
     return HasSolidFloorUnderBed(nv, vpc);
   }
 

@@ -68,6 +68,18 @@ public class PlayerSpawnController : MonoBehaviour
   /// </summary>
   public static System.Func<ZDO, bool>? IsVehicleSpawnReady;
 
+  /// <summary>
+  /// Assigned by the vehicle mod. Given a bed ZDO, drives the boat to stream in (force-sends pieces,
+  /// activates them) and returns the bed's parent VEHICLE's LIVE world position, or null if it cannot
+  /// be resolved yet. The resolver centres the streaming reference on THIS instead of the bed ZDO's
+  /// own position: a bed ZDO's position is only kept live once the boat's pieces have activated, so on
+  /// a moving boat that is still unloaded the bed position is stale (where the boat last unloaded) and
+  /// pinning the reference there loads empty water while the real boat sails away — the deadlock that
+  /// left boats ~15% loaded. The vehicle's own ZDO is updated every frame by the driver, so it is the
+  /// reliable "where is the boat now". When null, the resolver falls back to the bed ZDO position.
+  /// </summary>
+  public static System.Func<ZDO, Vector3?>? GetVehicleLiveStreamPosition;
+
   // internal Stopwatch UpdateLocationTimer = new();
   private static Player? player => Player.m_localPlayer;
   public static Coroutine? MoveToLogoutRoutine;

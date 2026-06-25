@@ -201,6 +201,12 @@ public class ValheimRaftPlugin : BaseUnityPlugin
     // so they land on a solid deck instead of falling through the water while the boat streams in.
     PlayerSpawnController.IsVehicleSpawnReady =
       DynamicLocationsLoginIntegration.IsVehicleSpawnReadyForBed;
+
+    // Strategy B stream driver: centres the respawn streaming reference on the boat's LIVE vehicle ZDO
+    // position (the bed ZDO position is stale until the boat activates, which deadlocks a moving boat),
+    // and force-sends the pieces to that position each frame so the whole boat streams in like a relog.
+    PlayerSpawnController.GetVehicleLiveStreamPosition =
+      DynamicLocationsLoginIntegration.GetVehicleLiveStreamPositionForBed;
   }
 
 

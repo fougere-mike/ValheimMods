@@ -392,3 +392,10 @@ src/ValheimRAFT.Unity/Assets/SUIMONO - WATER SYSTEM 2
 modSync.json5
 
 mod-releases
+# Local Linux compile-check artifacts (build-linux.sh) — must NOT be committed.
+# Directory.Build.targets in particular would break the Windows build if committed.
+/Directory.Build.targets
+/Dependencies
+/build-ready/
+# Packaged Thunderstore zips are release artifacts (attached to GitHub releases), not source.
+/dist/
