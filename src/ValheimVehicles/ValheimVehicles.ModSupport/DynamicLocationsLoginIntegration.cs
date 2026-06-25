@@ -234,7 +234,54 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
         vpc.SetInitComplete();
     }
 
+    // ZNetScene's sector-gated streaming caps a far/moving boat at ~60 of 574 pieces: the rest of the
+    // piece ZDOs are already known to this client (m_allPieces is full) but their GameObjects are
+    // never instantiated, so there is nothing for activation to do (pending stays 0). Force-instantiate
+    // the missing ones directly from their ZDOs via ZNetScene.CreateObject (the same path the
+    // server-side ZDO rebuild uses) — but WITHOUT claiming ownership, so the driver keeps the boat.
+    // Each instantiated piece's PieceActivatorComponent registers it as pending; the activation pass
+    // below then parents + positions it onto the deck (and survives like the natural pieces).
+    ForceInstantiateMissingPieces(vpc.PersistentZdoId, 50);
+
     vpc.StartActivatePendingPieces();
+  }
+
+  /// <summary>
+  /// Instantiates any of the vehicle's registered piece ZDOs that ZNetScene has not created yet,
+  /// bounded to <paramref name="maxPerCall" /> per frame to spread the cost. Returns the count created.
+  /// </summary>
+  private static int ForceInstantiateMissingPieces(int vehicleId, int maxPerCall)
+  {
+    if (ZNetScene.instance == null) return 0;
+    if (!VehiclePiecesController.m_allPieces.TryGetValue(vehicleId, out var zdos) ||
+        zdos == null) return 0;
+
+    var created = 0;
+    // snapshot — CreateObject + piece registration can mutate the underlying lists
+    foreach (var zdo in zdos.ToList())
+    {
+      if (created >= maxPerCall) break;
+      if (zdo == null || !zdo.IsValid()) continue;
+      if (ZNetScene.instance.FindInstance(zdo.m_uid) != null) continue; // already streamed in
+      var prefabHash = zdo.GetPrefab();
+      if (!ZNetScene.instance.m_namedPrefabs.ContainsKey(prefabHash)) continue;
+      var go = ZNetScene.instance.CreateObject(zdo);
+      if (go != null) created++;
+    }
+
+    return created;
+  }
+
+  private static int CountLiveInstances(int vehicleId)
+  {
+    if (ZNetScene.instance == null) return 0;
+    if (!VehiclePiecesController.m_allPieces.TryGetValue(vehicleId, out var zdos) ||
+        zdos == null) return 0;
+    var live = 0;
+    foreach (var zdo in zdos)
+      if (zdo != null && zdo.IsValid() &&
+          ZNetScene.instance.FindInstance(zdo.m_uid) != null) live++;
+    return live;
   }
 
   private static IEnumerator HoldAndLoadThenOnboard(ZDO bedZdo,
@@ -307,7 +354,7 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
             ? apl.Count
             : 0;
         Logger.LogInfo(
-          $"[Respawn] streaming bed {bedZdo?.m_uid}; vpc={vpc != null} initState={(vpc != null ? vpc.BaseVehicleInitState.ToString() : "-")} registered={CountRegisteredPieces(vpc)} activated={(vpc != null ? vpc.m_pieces.Count : 0)} pending={aPending} beds={(vpc != null ? vpc.GetBedPieces()?.Count ?? 0 : 0)} solidFrames={solidFrames} t={timer.ElapsedMilliseconds}ms");
+          $"[Respawn] streaming bed {bedZdo?.m_uid}; vpc={vpc != null} initState={(vpc != null ? vpc.BaseVehicleInitState.ToString() : "-")} registered={CountRegisteredPieces(vpc)} live={CountLiveInstances(vehicleId)} activated={(vpc != null ? vpc.m_pieces.Count : 0)} pending={aPending} beds={(vpc != null ? vpc.GetBedPieces()?.Count ?? 0 : 0)} solidFrames={solidFrames} t={timer.ElapsedMilliseconds}ms");
       }
 
       yield return new WaitForFixedUpdate();
