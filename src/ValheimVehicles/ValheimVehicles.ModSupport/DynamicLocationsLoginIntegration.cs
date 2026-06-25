@@ -344,13 +344,14 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
     }
     var tick = _streamTick++;
 
-    // ~every 0.5s ask the server to force-send the pieces AND push back the authoritative live vehicle
-    // position; also pull the vehicle's own ZDO. (RequestZdoFromServer alone proved unreliable for
-    // refreshing a far/unowned ZDO's position — the bed/vehicle ZDO stayed frozen at the spot the boat
-    // last unloaded — so we depend on the explicit server position push, not the ZDO refresh.)
+    // ~every 0.5s ask the server to push back the authoritative live vehicle position (RequestZdoFromServer
+    // alone proved unreliable for refreshing a far/unowned ZDO's position). Force-send the PIECES only
+    // while the boat is not yet loaded — once it has a live instance, re-sending all the pieces every
+    // frame just churns the piece controller and it never settles into a solid deck.
+    var loaded = VehiclePiecesController.ActiveInstances.ContainsKey(vehicleId);
     if (tick % 25 == 0)
     {
-      VehiclePieceSyncRPC.Request(vehicleId);
+      VehiclePieceSyncRPC.Request(vehicleId, includePieces: !loaded);
       ZdoWatchController.Instance.RequestZdoFromServer(vehicleId);
     }
 
@@ -477,14 +478,44 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
   /// <see cref="GetVehicleLiveStreamPositionForBed" /> (driven each frame from the resolver); this only
   /// reports readiness.
   /// </summary>
+  private static int _vsrLogTick;
+
   public static bool IsVehicleSpawnReadyForBed(ZDO bedZdo)
   {
     if (ZNetScene.instance == null) return false;
+    var vehicleId = VehiclePiecesController.GetParentID(bedZdo);
     var nv = ZNetScene.instance.FindInstance(bedZdo);
-    if (!nv) return false;
-    var vpc = VehiclePiecesController.GetVehiclePiecesController(nv.gameObject);
-    if (vpc == null) return false;
-    return HasSolidFloorUnderBed(nv, vpc);
+    var vpc = nv != null
+      ? VehiclePiecesController.GetVehiclePiecesController(nv.gameObject)
+      : null;
+    VehiclePiecesController.ActiveInstances.TryGetValue(vehicleId,
+      out var activeVpc);
+    var useVpc = vpc ?? activeVpc;
+
+    var floor = nv != null && useVpc != null && HasSolidFloorUnderBed(nv, useVpc);
+
+    if (_vsrLogTick++ % 25 == 0)
+    {
+      var registered =
+        VehiclePiecesController.m_allPieces.TryGetValue(vehicleId, out var rl) &&
+        rl != null
+          ? rl.Count
+          : 0;
+      var pending =
+        VehiclePiecesController.m_pendingPieces.TryGetValue(vehicleId,
+          out var pl) && pl != null
+          ? pl.Count
+          : 0;
+      var activated = useVpc != null ? useVpc.m_pieces.Count : 0;
+      Logger.LogInfo(
+        $"[Respawn] ready? vehicle={vehicleId} bedInstance={nv != null} vpcLoaded={activeVpc != null} initState={(useVpc != null ? useVpc.BaseVehicleInitState.ToString() : "-")} activated={activated} pending={pending} registered={registered} actComplete={(useVpc != null && useVpc.IsActivationComplete)} initialActComplete={(useVpc != null && useVpc.isInitialPieceActivationComplete)} floor={floor}");
+    }
+
+    // Spawn as soon as the bed instance + its vehicle controller exist. Do NOT block on the solid
+    // floor here: a far boat only finishes activating once the local player is ONBOARD it (same as a
+    // relog / standing on it). HoldAndLoadThenOnboard onboards the player and holds them FROZEN on the
+    // bed until a real deck exists, so it is safe to spawn before the floor is ready.
+    return nv != null && useVpc != null;
   }
 
   private static bool HasSolidFloorUnderBed(ZNetView bedNv,

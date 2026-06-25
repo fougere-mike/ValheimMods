@@ -43,8 +43,15 @@ public static class VehiclePieceSyncRPC
         RPC_VehiclePosResponse);
   }
 
-  /// <summary>Client -> server: force-send me every piece of this vehicle + reply with its live pos.</summary>
-  public static void Request(int vehiclePersistentId)
+  /// <summary>
+  /// Client -> server: always reply with the vehicle's live position; ALSO bulk force-send every
+  /// piece only when <paramref name="includePieces" /> is true. The piece send snaps all piece ZDOs to
+  /// the (server-collapsed) vehicle centre and re-sends all of them — useful ONCE to bulk-load an
+  /// unloaded boat, but HARMFUL if repeated every frame: it churns the client's piece controller and
+  /// the boat never settles into a solid deck. So callers send pieces only while the boat is not yet
+  /// loaded, then switch to position-only.
+  /// </summary>
+  public static void Request(int vehiclePersistentId, bool includePieces)
   {
     if (vehiclePersistentId == 0) return;
     if (RequestPieces_RPCInstance == null) return;
@@ -54,6 +61,7 @@ public static class VehiclePieceSyncRPC
 
     var pkg = new ZPackage();
     pkg.Write(vehiclePersistentId);
+    pkg.Write(includePieces);
     RequestPieces_RPCInstance.Send(ZRoutedRpc.instance.GetServerPeerID(), pkg,
       false);
   }
@@ -70,6 +78,7 @@ public static class VehiclePieceSyncRPC
     pkg.SetPos(0);
     var vehicleId = pkg.ReadInt();
     if (vehicleId == 0) yield break;
+    var includePieces = pkg.ReadBool();
     if (ZNet.instance == null || !ZNet.instance.IsServer()) yield break;
     if (ZDOMan.instance == null) yield break;
 
@@ -89,6 +98,10 @@ public static class VehiclePieceSyncRPC
       resp.Write(vehicleZdo.GetPosition());
       VehiclePosResponse_RPCInstance.Send(sender, resp, false);
     }
+
+    // Position-only request (boat already loading on the client) — do NOT re-snap / re-send the
+    // pieces, which would churn the client's piece controller and stop it ever settling.
+    if (!includePieces) yield break;
 
     if (!VehiclePiecesController.m_allPieces.TryGetValue(vehicleId,
           out var pieces) || pieces == null)
