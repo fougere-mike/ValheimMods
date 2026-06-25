@@ -365,25 +365,29 @@ public class DynamicLocationsLoginIntegration : DynamicLoginIntegration
       }
     }
 
-    // Resolve the boat's LIVE position from the most reliable source available:
-    //  1. a loaded VPC instance (exact),
-    //  2. the server-pushed authoritative position (robust to stale client ZDOs; needs server 4.3.4+),
-    //  3. the centroid of the most-populated zone among the piece ZDOs (client-only; robust to a few
-    //     stale outliers like a bed whose position didn't refresh),
-    //  4. the vehicle's own ZDO position (may be stale).
+    // Resolve the boat's LIVE position. ORDER MATTERS:
+    //  1. the SERVER-PUSHED authoritative position — it always advances with the moving boat.
+    //  2. a loaded VPC instance — ONLY as a fallback. A loaded client instance is NOT reliable for a
+    //     fast boat: once the streaming reference centres on it, the non-owned replica stops receiving
+    //     the owner's position updates and FREEZES, stranding the reference behind the real (still
+    //     sailing) boat — observed in the logs as `instance` stuck at one spot while `server-push` kept
+    //     advancing, which deadlocked streaming and timed the resolver out.
+    //  3. the centroid of the most-populated zone among the piece ZDOs (client-only; can be wrong
+    //     mid-move when pieces straddle two zones).
+    //  4. the vehicle's own ZDO position (often stale).
     Vector3? chosen = null;
     var source = "none";
-    if (VehiclePiecesController.ActiveInstances.TryGetValue(vehicleId,
-          out var inst) && inst != null)
-    {
-      chosen = inst.transform.position;
-      source = "instance";
-    }
-    else if (VehiclePieceSyncRPC.TryGetServerVehiclePosition(vehicleId,
-               out var serverPos))
+    if (VehiclePieceSyncRPC.TryGetServerVehiclePosition(vehicleId,
+          out var serverPos))
     {
       chosen = serverPos;
       source = "server-push";
+    }
+    else if (VehiclePiecesController.ActiveInstances.TryGetValue(vehicleId,
+               out var inst) && inst != null)
+    {
+      chosen = inst.transform.position;
+      source = "instance";
     }
     else if (TryGetPieceCloudPosition(vehicleId, out var cloud, out _))
     {
